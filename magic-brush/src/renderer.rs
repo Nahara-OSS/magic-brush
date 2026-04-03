@@ -21,7 +21,8 @@ pub trait Renderer<I: Clone + Eq + Hash> {
     /// to begin new stroke manually.
     fn try_change_preset(&mut self, preset: &dyn Any) -> bool;
 
-    /// Reset internal states and prepare to begin new stroke.
+    /// Reset internal states and prepare to begin new stroke. Does nothing when there is no active preset in this brush
+    /// renderer.
     fn begin_new_stroke(&mut self);
 
     /// Read stylus input and parameters then update the internal states. This function may only be called once for each
