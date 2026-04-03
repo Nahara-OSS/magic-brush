@@ -639,7 +639,7 @@ impl<I: Clone + Eq + Hash> renderer::Renderer<I> for Renderer<I> {
         &mut self,
         tile_id: &I,
         tile_rect: &Rect,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: Option<&mut wgpu::CommandEncoder>,
     ) -> Result<(), RendererError> {
         let Some(brush) = &self.active_brush else {
             return Err(RendererError::NoPreset);
@@ -750,9 +750,8 @@ impl<I: Clone + Eq + Hash> renderer::Renderer<I> for Renderer<I> {
 
         let (uniform_buffer, uniform_bind_group) = &self.uniform_pool[uniform_buffer_index as usize];
         self.queue.write_buffer(uniform_buffer, uniform_offset, uniform_data);
-
         let tile_data = &self.internal_tiles[tile_id];
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let render_pass_desc = wgpu::RenderPassDescriptor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &tile_data.color_texture_view,
                 ops: wgpu::Operations {
@@ -771,12 +770,29 @@ impl<I: Clone + Eq + Hash> renderer::Renderer<I> for Renderer<I> {
                 stencil_ops: None,
             }),
             ..Default::default()
-        });
+        };
+
+        let mut managed_encoder = match &encoder {
+            Some(_) => None,
+            None => Some(self.device.create_command_encoder(&Default::default())),
+        };
+
+        let mut render_pass = match &mut managed_encoder {
+            Some(encoder) => encoder.begin_render_pass(&render_pass_desc),
+            None => encoder.unwrap().begin_render_pass(&render_pass_desc),
+        };
+
         render_pass.set_pipeline(&brush.pipeline);
         render_pass.set_bind_group(0, uniform_bind_group, &[uniform_offset as wgpu::DynamicOffset]);
         render_pass.set_bind_group(1, Some(&brush.bind_group), &[]);
         render_pass.set_vertex_buffer(0, self.instance_buffer.slice(0..)); // TODO: Only draw visible stamps
         render_pass.draw(0..4, 0..self.stamp_count);
+        drop(render_pass);
+
+        if let Some(encoder) = managed_encoder {
+            self.queue.submit([encoder.finish()]);
+        }
+
         Ok(())
     }
 

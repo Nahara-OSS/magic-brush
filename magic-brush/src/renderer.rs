@@ -32,11 +32,14 @@ pub trait Renderer<I: Clone + Eq + Hash> {
 
     /// Prepare tile data for rendering. This function may only be called once for each unique tile that is intersecting
     /// the rectangular area returned from [`Renderer::prepare_input`].
+    /// 
+    /// The command encoder is optional, but highly recommended if there are multiple tiles that need to be prepared, or
+    /// the tile preparation phase is immediately followed by tile rendering phase.
     fn prepare_tile(
         &mut self,
         tile_id: &I,
         tile_rect: &Rect,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: Option<&mut wgpu::CommandEncoder>,
     ) -> Result<(), RendererError>;
 
     /// Render the content of the tile to render pass. The render pass should only have a single color attachment and no
