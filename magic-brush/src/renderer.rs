@@ -12,6 +12,18 @@ pub trait RendererFactory {
     ) -> impl Renderer<I>;
 }
 
+/// The trait for brush renderers.
+/// 
+/// **Why [`Renderer::prepare_tile`] and [`Renderer::render_tile`] must be separated?** That's because there are 2
+/// possible paths that [`Renderer::render_tile`] can take when rendering the stroke:
+/// 
+/// - Render directly to surface texture, or;
+/// - Render to separate texture for storing.
+/// 
+/// The former one is meant to be used while the stroke is still being drawn, while the latter one should only be used
+/// once to "commit" the stroke to the texture for storing. If we combine both functions together, we would be stacking
+/// current stroke on top of old result on each call, which could yield unwanted darkening effect, especially for low
+/// opacity strokes.
 pub trait Renderer<I: Clone + Eq + Hash> {
     /// Attempt to change preset. Always assume this function will reset the internal state of renderer upon calling for
     /// any kind of input. Once this function returns `true`, the other functions can be called. Calling other functions

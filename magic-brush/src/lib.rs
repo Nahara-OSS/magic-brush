@@ -25,10 +25,10 @@
 //!   - Call [`renderer::Renderer::prepare_tile`] for each tile intersecting the [`renderer::Rect`] returned from
 //!     [`renderer::Renderer::prepare_input`]. The tile ID will be used to distinguish between each tile (and may be
 //!     used by brush renderer to store the tile-specific state internally).
-//!   - Call [`renderer::Renderer::render_tile`] for each tile to draw the stroke to tile's texture that was attached to
-//!     color attachment of provided render pass.
-//!   - And finally, submit the [`wgpu::CommandBuffer`] in order to actually draw the content, which also flush the
-//!     buffers and prepare for next input event.
+//!   - If the stroke is still being drawn, [`renderer::Renderer::render_tile`] may be used on surface texture to
+//!     preview the content.
+//! - At the end of the stroke (eg: on stylus up), [`renderer::Renderer::render_tile`] should be used to draw the
+//!   content to texture for storage.
 
 pub mod dynamic;
 pub mod graph;
