@@ -68,20 +68,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Supply one or more stylus inputs to the renderer
     // Here we just draw from (100; 100) to (1000; 1000) while increasing the logical pressure value from 0 to 1
-    renderer.next_input(&StylusInput {
-        timestamp: 0.0,
-        position: Vec2(100.0, 100.0),
-        pressure: 0.0,
-        tilt: Vec2(0.0, 0.0),
-        twist: 0.0,
-    })?;
-    renderer.next_input(&StylusInput {
-        timestamp: 2.0,
-        position: Vec2(1000.0, 1000.0),
-        pressure: 1.0,
-        tilt: Vec2(0.0, 0.0),
-        twist: 0.0,
-    })?;
+    // We also pick pure red color for this one
+    renderer.next_input(
+        &StylusInput {
+            timestamp: 0.0,
+            position: Vec2(100.0, 100.0),
+            pressure: 0.0,
+            tilt: Vec2(0.0, 0.0),
+            twist: 0.0,
+        },
+        [1.0, 0.0, 0.0],
+    )?;
+    renderer.next_input(
+        &StylusInput {
+            timestamp: 2.0,
+            position: Vec2(1000.0, 1000.0),
+            pressure: 1.0,
+            tilt: Vec2(0.0, 0.0),
+            twist: 0.0,
+        },
+        [1.0, 0.0, 0.0],
+    )?;
 
     // This part is where we encode command buffer and submit it to actually draw something
     let mut encoder = device.create_command_encoder(&Default::default());

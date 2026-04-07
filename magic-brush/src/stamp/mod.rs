@@ -452,7 +452,7 @@ impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
         Ok(())
     }
 
-    fn next_input(&mut self, input: &StylusInput) -> Result<Rect, Error> {
+    fn next_input(&mut self, input: &StylusInput, color: [f32; 3]) -> Result<Rect, Error> {
         let Some(brush) = &self.brush else {
             return Err(Error::NoPreset);
         };
@@ -466,7 +466,7 @@ impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
                 let lerp_fraction = brush.spacing / vector.len();
                 let next_input = StylusInput::lerp(&last_input, input, lerp_fraction);
                 let stamp = Stamp {
-                    color: [0.0, 0.0, 0.0, 1.0],
+                    color: [color[0], color[1], color[2], 1.0],
                     world_coords: (next_input.position
                         + brush
                             .offset
@@ -489,7 +489,7 @@ impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
             Ok(bounds.unwrap_or(Default::default()))
         } else {
             let stamp = Stamp {
-                color: [0.0, 0.0, 0.0, 1.0],
+                color: [color[0], color[1], color[2], 1.0],
                 world_coords: (input.position + brush.offset.derive(&mut self.jitter, None, input).into()).into(),
                 size: brush.size.derive(&mut self.jitter, None, input),
                 flow: brush.flow.derive(&mut self.jitter, None, input),

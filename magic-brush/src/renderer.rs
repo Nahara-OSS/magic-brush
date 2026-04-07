@@ -56,9 +56,10 @@ pub trait Renderer<P, I: Clone + Eq + Hash> {
 
     /// Read next input event.
     ///
-    /// Read the next input event and update the renderer state accordingly. This must be called before entering
-    /// rendering phase.
-    fn next_input(&mut self, input: &StylusInput) -> Result<Rect, Error>;
+    /// Read the next input event and update the renderer state accordingly. The color is a three-component array in RGB
+    /// order and it applies to partial stroke created from this function. This must be called before entering rendering
+    /// phase.
+    fn next_input(&mut self, input: &StylusInput, color: [f32; 3]) -> Result<Rect, Error>;
 
     /// Begin rendering phase.
     ///

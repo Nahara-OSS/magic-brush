@@ -57,10 +57,10 @@ impl<I: Clone + Eq + Hash> Renderer<Brush, I> for BrushRenderer<I> {
         }
     }
 
-    fn next_input(&mut self, input: &StylusInput) -> Result<Rect, Error> {
+    fn next_input(&mut self, input: &StylusInput, color: [f32; 3]) -> Result<Rect, Error> {
         match self.active {
             ActiveRenderer::None => Err(Error::NoPreset),
-            ActiveRenderer::Stamp => self.stamp.next_input(input),
+            ActiveRenderer::Stamp => self.stamp.next_input(input, color),
         }
     }
 
