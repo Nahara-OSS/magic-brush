@@ -1,0 +1,151 @@
+:root {
+    font-family: Inter, Arial, sans-serif;
+    font-size: 12px;
+}
+
+html {
+    width: 100dvw;
+    height: 100dvh;
+
+    > body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+
+        > #inner {
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            display: flex;
+            flex-direction: row;
+
+            > .document,
+            > .brush-editor {
+                display: flex;
+                flex-direction: column;
+                overflow-y: auto;
+
+                > .menu-bar {
+                    display: flex;
+                    flex-direction: row;
+                    padding: 0.8rem;
+                    border-bottom: 1px solid #9f9f9f;
+                }
+
+                > .section {
+                    display: flex;
+                    flex-direction: column;
+                    border-bottom: 1px solid #9f9f9f;
+                    gap: 0.2rem;
+                    padding: 0.8rem;
+                }
+            }
+
+            > .document {
+                width: 300px;
+                border-right: 1px solid #9f9f9f;
+            }
+
+            > .brush-editor {
+                width: 300px;
+                border-left: 1px solid #9f9f9f;
+            }
+
+            > .canvas-area {
+                width: 0;
+                flex-grow: 1;
+                background-color: #efefef;
+                position: relative;
+
+                > .inner {
+                    position: absolute;
+                    left: 50%;
+                    top: 50%;
+                    translate: -50% -50%;
+                }
+            }
+        }
+    }
+}
+
+span.label {
+    padding-inline: 0.8rem;
+}
+
+select,
+::picker(select) {
+    appearance: base-select;
+}
+
+select {
+    font-family: inherit;
+    font-size: inherit;
+    box-sizing: border-box;
+    height: 2rem;
+    border-radius: 0;
+    border: 1px solid #9f9f9f;
+    padding-block: 0;
+    padding-inline: 0.8rem;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+
+    &::picker-icon {
+        margin: 0;
+    }
+
+    &:hover {
+        background-color: #0000000f;
+        border-color: #3f3f3f;
+    }
+
+    &:active {
+        background-color: #0000001f;
+    }
+}
+
+::picker(select) {
+    translate: 0 -1px;
+    border: 1px solid #9f9f9f;
+}
+
+button {
+    font-family: inherit;
+    font-size: inherit;
+    appearance: none;
+    box-sizing: border-box;
+    border: 1px solid #9f9f9f;
+    height: 2rem;
+    padding: 0;
+    background-color: transparent;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+
+    &:hover {
+        background-color: #0000000f;
+        border-color: #3f3f3f;
+    }
+
+    &:active {
+        background-color: #0000001f;
+    }
+}
+
+.horizontal-button-group {
+    display: flex;
+    flex-direction: row;
+    gap: 0.2rem;
+
+    > * {
+        width: 0;
+        flex-grow: 1;
+    }
+}
+
+.spacer {
+    width: 0;
+    flex-grow: 1;
+}

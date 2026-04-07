@@ -21,7 +21,7 @@ fn vertexShader(
     @builtin(vertex_index) i: u32,
     stamp: Stamp
 ) -> Vertex {
-    const positions = array(vec2f(-0.5,  0.5), vec2f(0.5,  0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
+    const positions = array(vec2f(-0.5, 0.5), vec2f(0.5, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
     const texture_coords = array(vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(0.0, 1.0), vec2f(1.0, 1.0));
 
     return Vertex(

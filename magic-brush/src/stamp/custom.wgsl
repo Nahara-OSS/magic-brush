@@ -17,6 +17,5 @@ struct Fragment {
 @fragment
 fn customFragment(v: Vertex) -> Fragment {
     let value = textureSample(tip_texture, tip_sampler, v.texture_coords).r;
-    let color = vec4f(1.0) * value;
     return Fragment(v.color * v.flow, v.opacity * value);
 }

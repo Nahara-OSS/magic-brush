@@ -1,19 +1,42 @@
-use std::{collections::HashMap, hash::Hash, mem, num::NonZero, result::Result};
+//! The module for stamp-based brush.
+//!
+//! The concept of stamp-based brush is simple: stamp the brush tips along the path with small enough spacing so that
+//! the stroke becomes continuous. This technique has been used by popular drawing applications like Krita (with Pixel
+//! Brush Engine), Adobe Photoshop or Clip Studio Paint.
+//!
+//! This stamp-based brush supports **partially drawn stroke** rendering method. Specifically, everytime the renderer
+//! read an input event and draw to texture internally, it will only draw the new part of the stroke from such input,
+//! instead of drawing entire stroke all over again. This allows the stamp-based brush engine to be efficient in
+//! rendering the brush without filling the GPU memory, since the content of the stroke is accumulated on internal
+//! "stroke layer".
+//!
+//! The stroke layer contains 2 different textures:
+//!
+//! - **Color texture**: Just like the name suggested, this texture is for storing the stroke color only. If the bitmap
+//!   is a premultiplied image, the bitmap will be unpremultiplied first, then multiplied by flow value before stamping
+//!   to color texture.
+//! - **Opacity texture**: This texture contains the opacity data (well it's actually alpha mask) in a form of depth
+//!   buffer with depth test function [`wgpu::CompareFunction::GreaterEqual`].
+
+use std::{collections::HashMap, hash::Hash, result::Result};
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use wgpu::util::DeviceExt;
 
 use crate::{
     dynamic::{Dynamic, DynamicArray, DynamicContext},
-    graph::Graph,
     input::StylusInput,
-    renderer::{self, Rect, RendererError, RendererFactory},
-    utils::Vector2Like,
+    renderer::{Error, Renderer},
+    utils::{
+        graph::Graph,
+        lnag::{Rect, Vec2},
+    },
 };
 
 /// Stamp-based brush preset. May be serialized or deserialized with [`serde`].
 #[derive(Serialize, Deserialize)]
-pub struct Brush {
+pub struct StampBrush {
     /// The brush tip that will be used for stamping to stroke layer.
     pub tip: BrushTip,
 
@@ -33,7 +56,7 @@ pub struct Brush {
     pub offset: [Dynamic; 2],
 }
 
-impl Default for Brush {
+impl Default for StampBrush {
     fn default() -> Self {
         Self {
             tip: Default::default(),
@@ -54,7 +77,7 @@ pub enum BrushTip {
     Square {
         /// The depth graph for square stamp. The input value goes from the center to the edge of square. The output
         /// value is the grayscale value of the brush tip.
-        graph: Vec<[f32; 2]>,
+        graph: Vec<Vec2>,
     },
 
     /// Use circle-shaped brush tip.
@@ -62,7 +85,7 @@ pub enum BrushTip {
     Circle {
         /// The depth graph for circular stamp. The input value goes from the center to the edge of circle. The output
         /// value is the grayscale value of the brush tip.
-        graph: Vec<[f32; 2]>,
+        graph: Vec<Vec2>,
     },
 
     /// Use brush tip with custom shape defined in grayscale bitmap data. The size of bitmap data will be scaled so that
@@ -86,105 +109,80 @@ pub enum BrushTip {
 impl Default for BrushTip {
     fn default() -> Self {
         BrushTip::Circle {
-            graph: vec![[0.0, 1.0], [1.0, 1.0]],
+            graph: vec![Vec2(0.0, 1.0), Vec2(1.0, 1.0)],
         }
     }
 }
 
-/// Renderer for stamp-based brush presets.
-pub struct Renderer<I: Eq + Hash> {
+pub struct StampBrushRenderer<I: Clone + Eq + Hash> {
     device: wgpu::Device,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
 
+    uniform_buffer: wgpu::Buffer,
+    uniform_staging: wgpu::util::StagingBelt,
+    uniform_bind_group: wgpu::BindGroup,
+
+    common_bind_group_layout: wgpu::BindGroupLayout,
+    custom_bind_group_layout: wgpu::BindGroupLayout,
     circle_pipeline: wgpu::RenderPipeline,
     square_pipeline: wgpu::RenderPipeline,
     custom_pipeline: wgpu::RenderPipeline,
-    copy_pipeline: wgpu::RenderPipeline,
-    uniform_bind_group_layout: wgpu::BindGroupLayout,
-    common_bind_group_layout: wgpu::BindGroupLayout,
-    custom_bind_group_layout: wgpu::BindGroupLayout,
+    tip_sampler: wgpu::Sampler,
+
     copy_bind_group_layout: wgpu::BindGroupLayout,
-    brush_tip_sampler: wgpu::Sampler,
-    uniform_pool: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
-    uniform_align: u32,
-    uniform_index: u32,
-    instance_buffer: wgpu::Buffer,
+    copy_pipeline: wgpu::RenderPipeline,
     copy_sampler: wgpu::Sampler,
 
-    active_brush: Option<ActiveBrush>,
-    last_input: Option<(StylusInput, [f32; 4])>,
-    jitter: Jitter,
+    tiles: HashMap<I, InternalTileData>,
+    brush: Option<ActiveBrush>,
+    last_input: Option<StylusInput>,
+    stamp_queue: Vec<Stamp>,
+    stamp_buffer: Option<wgpu::Buffer>,
     stamp_count: u32,
-    internal_tiles: HashMap<I, InternalTileData>,
+    jitter: StampBrushDynamicContext,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Stamp {
-    color: [f32; 4],
-    world_coords: [f32; 2],
-    size: f32,
-    flow: f32,
-    opacity: f32,
-}
-
-struct ActiveBrush {
-    pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    spacing: f32,
-    size: Dynamic,
-    flow: Dynamic,
-    opacity: Dynamic,
-    offset: [Dynamic; 2],
-}
-
-struct InternalTileData {
-    color_texture_view: wgpu::TextureView,
-    opacity_texture_view: wgpu::TextureView,
-    copy_bind_group: wgpu::BindGroup,
-}
-
-#[derive(Default)]
-struct Jitter {
-    rng: rand::rngs::ThreadRng,
-    stroke: f32,
-}
-
-impl DynamicContext for Jitter {
-    fn jitter_stroke(&self) -> f32 {
-        self.stroke
-    }
-
-    fn jitter_dab(&mut self) -> f32 {
-        self.rng.random()
-    }
-}
-
-impl<I: Eq + Hash> RendererFactory for Renderer<I> {
-    fn create<T: Clone + Eq + Hash>(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> impl renderer::Renderer<T> {
-        let min_align = device.limits().min_uniform_buffer_offset_alignment;
+impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
+    fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let vertex_shader_module = device.create_shader_module(wgpu::include_wgsl!("./vertex.wgsl"));
         let common_shader_module = device.create_shader_module(wgpu::include_wgsl!("./common.wgsl"));
         let custom_shader_module = device.create_shader_module(wgpu::include_wgsl!("./custom.wgsl"));
         let copy_shader_module = device.create_shader_module(wgpu::include_wgsl!("./copy.wgsl"));
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Uniform buffer"),
+            size: size_of::<[f32; 16]>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let uniform_staging = wgpu::util::StagingBelt::new(device.clone(), uniform_buffer.size() * 16);
         let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Uniform bind group"),
+            label: Some("Uniform bind group layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
                 count: None,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true, // Dynamic offset for each tile
+                    has_dynamic_offset: false,
                     min_binding_size: None,
                 },
             }],
         });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniform bind group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform_buffer,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
+
         let common_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Common brush tip bind group"),
             entries: &[
@@ -227,17 +225,16 @@ impl<I: Eq + Hash> RendererFactory for Renderer<I> {
                 },
             ],
         });
+
         let copy_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Copy bind group"),
+            label: Some("Copy bind group layout"),
             entries: &[
-                // Sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     count: None,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 },
-                // Color texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -248,7 +245,6 @@ impl<I: Eq + Hash> RendererFactory for Renderer<I> {
                         multisampled: false,
                     },
                 },
-                // Opacity texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -261,6 +257,7 @@ impl<I: Eq + Hash> RendererFactory for Renderer<I> {
                 },
             ],
         });
+
         let common_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Circle/square pipeline layout"),
             immediate_size: 0,
@@ -331,8 +328,12 @@ impl<I: Eq + Hash> RendererFactory for Renderer<I> {
             }),
             write_mask: wgpu::ColorWrites::all(),
         };
-        Renderer::<T> {
-            format,
+
+        Self {
+            uniform_buffer,
+            uniform_staging,
+            uniform_bind_group,
+
             circle_pipeline: device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Circle brush tip"),
                 layout: Some(&common_pipeline_layout),
@@ -381,12 +382,20 @@ impl<I: Eq + Hash> RendererFactory for Renderer<I> {
                 multiview_mask: None,
                 cache: None,
             }),
+            common_bind_group_layout,
+            custom_bind_group_layout,
+            tip_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                min_filter: wgpu::FilterMode::Linear,
+                mag_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+
             copy_pipeline: device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Copy"),
                 layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Copy pipeline layout"),
                     immediate_size: 0,
-                    bind_group_layouts: &[&copy_bind_group_layout],
+                    bind_group_layouts: &[&uniform_bind_group_layout, &copy_bind_group_layout],
                 })),
                 primitive: primitive_state,
                 vertex: wgpu::VertexState {
@@ -406,354 +415,161 @@ impl<I: Eq + Hash> RendererFactory for Renderer<I> {
                 multiview_mask: None,
                 cache: None,
             }),
-            uniform_bind_group_layout,
-            common_bind_group_layout,
-            custom_bind_group_layout,
             copy_bind_group_layout,
-            brush_tip_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
-                min_filter: wgpu::FilterMode::Nearest,
-                mag_filter: wgpu::FilterMode::Nearest,
-                ..Default::default()
-            }),
-            uniform_pool: Vec::new(),
-            uniform_align: if mem::size_of::<[f32; 16]>().is_multiple_of(min_align as usize) {
-                mem::size_of::<[f32; 16]>() as u32
-            } else {
-                (mem::size_of::<[f32; 16]>() as u32 / min_align + 1) * min_align
-            },
-            uniform_index: 0,
-            instance_buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Stamps/instance buffer"),
-                mapped_at_creation: false,
-                size: (mem::size_of::<Stamp>() * 1024) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
-            }),
             copy_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 min_filter: wgpu::FilterMode::Nearest,
                 mag_filter: wgpu::FilterMode::Nearest,
                 ..Default::default()
             }),
-            active_brush: None,
+
+            tiles: HashMap::new(),
+            brush: None,
             last_input: None,
-            jitter: Default::default(),
+            stamp_queue: Vec::with_capacity(1024),
+            stamp_buffer: None,
             stamp_count: 0,
-            internal_tiles: HashMap::new(),
+            jitter: StampBrushDynamicContext::new(),
+
             device,
             queue,
+            format,
         }
     }
-}
 
-impl<I: Clone + Eq + Hash> renderer::Renderer<I> for Renderer<I> {
-    fn try_change_preset(&mut self, preset: &dyn std::any::Any) -> bool {
-        let Some(preset) = preset.downcast_ref::<Brush>() else {
-            return false;
-        };
-
-        let (pipeline, bind_group) = match &preset.tip {
-            BrushTip::Circle { graph } => {
-                let texture = self.make_texture_from_graph(graph);
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Circle brush tip"),
-                    layout: &self.common_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Sampler(&self.brush_tip_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
-                        },
-                    ],
-                });
-                (self.circle_pipeline.clone(), bind_group)
-            }
-            BrushTip::Square { graph } => {
-                let texture = self.make_texture_from_graph(graph);
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Square brush tip"),
-                    layout: &self.common_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Sampler(&self.brush_tip_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
-                        },
-                    ],
-                });
-                (self.square_pipeline.clone(), bind_group)
-            }
-            BrushTip::Bitmap { width, height, data } => {
-                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Custom brush tip"),
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    size: wgpu::Extent3d {
-                        width: *width,
-                        height: *height,
-                        ..Default::default()
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    view_formats: &[],
-                });
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Custom brush tip"),
-                    layout: &self.custom_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Sampler(&self.brush_tip_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
-                        },
-                    ],
-                });
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        aspect: wgpu::TextureAspect::All,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                    },
-                    data,
-                    wgpu::TexelCopyBufferLayout {
-                        bytes_per_row: Some(*width),
-                        rows_per_image: Some(*height),
-                        offset: 0,
-                    },
-                    wgpu::Extent3d {
-                        width: *width,
-                        height: *height,
-                        ..Default::default()
-                    },
-                );
-                (self.custom_pipeline.clone(), bind_group)
-            }
-        };
-
-        self.active_brush = Some(ActiveBrush {
-            pipeline,
-            bind_group,
-            spacing: preset.spacing,
-            size: preset.size.clone(),
-            flow: preset.flow.clone(),
-            opacity: preset.opacity.clone(),
-            offset: preset.offset.clone(),
-        });
-
-        self.begin_new_stroke();
-        true
+    fn use_preset(&mut self, preset: &StampBrush) -> Result<(), Error> {
+        self.brush = Some(ActiveBrush::new(self, preset));
+        self.new_stroke()
     }
 
-    fn begin_new_stroke(&mut self) {
-        self.uniform_index = 0;
+    fn new_stroke(&mut self) -> Result<(), Error> {
+        if self.brush.is_none() {
+            return Err(Error::NoPreset);
+        }
+
         self.last_input = None;
-        self.jitter.stroke = self.jitter.rng.random();
-        self.stamp_count = 0;
-        self.internal_tiles.clear();
+        self.stamp_queue.clear();
+        self.jitter.roll_stroke();
+        Ok(())
     }
 
-    fn prepare_input(&mut self, input: &StylusInput, color: &[f32; 4]) -> Result<Rect, RendererError> {
-        let mut stamps = Vec::<Stamp>::new();
-        let Some(brush) = &self.active_brush else {
-            return Err(RendererError::NoPreset);
+    fn next_input(&mut self, input: &StylusInput) -> Result<Rect, Error> {
+        let Some(brush) = &self.brush else {
+            return Err(Error::NoPreset);
         };
 
-        let area = if let Some((last_input, _)) = &self.last_input {
+        if let Some(last_input) = &self.last_input {
             let mut last_input = last_input.clone();
+            let mut bounds: Option<Rect> = None;
 
-            while input.position.vec2_sub(&last_input.position).vec2_len() >= brush.spacing {
-                let vector = input.position.vec2_sub(&last_input.position);
-                let lerp_fraction = brush.spacing / vector.vec2_len();
+            while (input.position - last_input.position).len() >= brush.spacing {
+                let vector = input.position - last_input.position;
+                let lerp_fraction = brush.spacing / vector.len();
                 let next_input = StylusInput::lerp(&last_input, input, lerp_fraction);
-
-                stamps.push(Stamp {
-                    color: *color,
-                    world_coords: last_input.position.vec2_add(&brush.offset.derive(
-                        &mut self.jitter,
-                        Some(&last_input),
-                        &next_input,
-                    )),
+                let stamp = Stamp {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    world_coords: (next_input.position
+                        + brush
+                            .offset
+                            .derive(&mut self.jitter, Some(&last_input), &next_input)
+                            .into())
+                    .into(),
                     size: brush.size.derive(&mut self.jitter, Some(&last_input), &next_input),
                     flow: brush.flow.derive(&mut self.jitter, Some(&last_input), &next_input),
                     opacity: brush.opacity.derive(&mut self.jitter, Some(&last_input), &next_input),
-                });
-
+                };
+                match &mut bounds {
+                    Some(bounds) => bounds.expand_mut(stamp.rect()),
+                    None => bounds = Some(stamp.rect()),
+                };
+                self.stamp_queue.push(stamp);
                 last_input = next_input;
             }
 
-            self.last_input = Some((last_input, *color));
-
-            Rect {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-            }
+            self.last_input = Some(last_input);
+            Ok(bounds.unwrap_or(Default::default()))
         } else {
-            self.last_input = Some((input.clone(), *color));
-
-            stamps.push(Stamp {
-                color: *color,
-                world_coords: input
-                    .position
-                    .vec2_add(&brush.offset.derive(&mut self.jitter, None, input)),
+            let stamp = Stamp {
+                color: [0.0, 0.0, 0.0, 1.0],
+                world_coords: (input.position + brush.offset.derive(&mut self.jitter, None, input).into()).into(),
                 size: brush.size.derive(&mut self.jitter, None, input),
                 flow: brush.flow.derive(&mut self.jitter, None, input),
                 opacity: brush.opacity.derive(&mut self.jitter, None, input),
-            });
+            };
 
-            Rect {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-            }
-        };
-
-        if (mem::size_of::<Stamp>() * stamps.len()) as u64 > self.instance_buffer.size() {
-            self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Stamps/instance buffer (grown)"),
-                mapped_at_creation: false,
-                size: (mem::size_of::<Stamp>() * stamps.len() * 2) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
-            });
+            let rect = stamp.rect();
+            self.last_input = Some(input.clone());
+            self.stamp_queue.push(stamp);
+            Ok(rect)
         }
-
-        let stamps_as_u8 = bytemuck::cast_slice(&stamps);
-        self.queue.write_buffer(&self.instance_buffer, 0, stamps_as_u8);
-        self.stamp_count = stamps.len() as u32;
-        self.uniform_index = 0;
-        Ok(area)
     }
 
-    fn prepare_tile(
-        &mut self,
-        tile_id: &I,
-        tile_rect: &Rect,
-        encoder: Option<&mut wgpu::CommandEncoder>,
-    ) -> Result<(), RendererError> {
-        let Some(brush) = &self.active_brush else {
-            return Err(RendererError::NoPreset);
+    fn render_begin(&mut self) -> Result<(), Error> {
+        self.uniform_staging.recall();
+
+        // We use the emptiness of stamp queue to determine whether we need to write instance buffer
+        if !self.stamp_queue.is_empty() {
+            let required_size = size_of::<Stamp>() * self.stamp_queue.len();
+            let current_size = self.stamp_buffer.as_ref().map(|b| b.size()).unwrap_or(0) as usize;
+
+            if required_size > current_size {
+                let new_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Instance buffer"),
+                    size: (required_size * 2) as u64,
+                    mapped_at_creation: true,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
+                });
+
+                let mut mapped_range = new_buffer.get_mapped_range_mut(..);
+                let casted_mapped_range: &mut [Stamp] = bytemuck::cast_slice_mut(&mut mapped_range);
+                casted_mapped_range[0..self.stamp_queue.len()].copy_from_slice(&self.stamp_queue);
+                drop(mapped_range);
+                new_buffer.unmap();
+                self.stamp_buffer = Some(new_buffer);
+            } else {
+                // unwrap():
+                // - current_size must not be zero
+                // - !stamp_queue.is_empty() so required_size must not be zero
+                let stamp_buffer = self.stamp_buffer.as_ref().unwrap();
+                let write_data = bytemuck::cast_slice(&self.stamp_queue);
+                self.queue.write_buffer(stamp_buffer, 0, write_data);
+            }
+        }
+
+        self.stamp_count = self.stamp_queue.len() as u32;
+        self.stamp_queue.clear();
+        Ok(())
+    }
+
+    fn render_input(&mut self, id: &I, rect: &Rect, encoder: &mut wgpu::CommandEncoder) -> Result<(), Error> {
+        let Some(brush) = &self.brush else {
+            return Err(Error::NoPreset);
         };
 
-        if !self.internal_tiles.contains_key(tile_id) {
-            let color_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Internal stroke color layer"),
-                format: self.format,
-                dimension: wgpu::TextureDimension::D2,
-                size: wgpu::Extent3d {
-                    width: tile_rect.width,
-                    height: tile_rect.height,
-                    ..Default::default()
-                },
-                view_formats: &[],
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                sample_count: 1,
-                mip_level_count: 1,
-            });
-            let opacity_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Internal stroke opacity layer"),
-                format: wgpu::TextureFormat::Depth16Unorm,
-                dimension: wgpu::TextureDimension::D2,
-                size: wgpu::Extent3d {
-                    width: tile_rect.width,
-                    height: tile_rect.height,
-                    ..Default::default()
-                },
-                view_formats: &[],
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                sample_count: 1,
-                mip_level_count: 1,
-            });
-            let color_texture_view = color_texture.create_view(&Default::default());
-            let opacity_texture_view = opacity_texture.create_view(&Default::default());
-            let copy_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Internal stroke layer"),
-                layout: &self.copy_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Sampler(&self.copy_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&color_texture_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&opacity_texture_view),
-                    },
-                ],
-            });
-            let tile_data = InternalTileData {
-                color_texture_view,
-                opacity_texture_view,
-                copy_bind_group,
-            };
-            self.internal_tiles.insert(tile_id.clone(), tile_data);
+        if !self.tiles.contains_key(id) {
+            self.tiles.insert(id.clone(), InternalTileData::new(self, rect));
         }
 
-        let world_to_clip: [f32; 16] = [
-            2.0 / tile_rect.width as f32,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            -2.0 / tile_rect.height as f32,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            -1.0,
-            1.0,
-            0.0,
-            1.0,
-        ];
-
-        const UNIFORMS_PER_BUFFER: u32 = 16;
-        let uniform_buffer_index = self.uniform_index / UNIFORMS_PER_BUFFER;
-        let uniform_data = bytemuck::bytes_of(&world_to_clip);
-        let uniform_offset = ((self.uniform_index % UNIFORMS_PER_BUFFER) * self.uniform_align) as u64;
-
-        while uniform_buffer_index as usize >= self.uniform_pool.len() {
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Uniform buffer"),
-                mapped_at_creation: false,
-                size: (self.uniform_align * UNIFORMS_PER_BUFFER) as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Uniform"),
-                layout: &self.uniform_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &buffer,
-                        offset: 0,
-                        size: Some(NonZero::new(mem::size_of::<[f32; 16]>() as u64).unwrap()),
-                    }),
-                }],
-            });
-            self.uniform_pool.push((buffer, bind_group));
+        {
+            let mut uniform_data = self.uniform_staging.write_buffer(
+                encoder,
+                &self.uniform_buffer,
+                0,
+                (size_of::<[f32; 16]>() as u64).try_into()?,
+            );
+            let uniform_data: &mut [f32] = bytemuck::cast_slice_mut(&mut uniform_data);
+            bytemuck::fill_zeroes(uniform_data);
+            uniform_data[0] = 2.0 / rect.size().0;
+            uniform_data[5] = -2.0 / rect.size().1;
+            uniform_data[10] = 1.0;
+            uniform_data[12] = -1.0;
+            uniform_data[13] = 1.0;
+            uniform_data[15] = 1.0;
         }
 
-        let (uniform_buffer, uniform_bind_group) = &self.uniform_pool[uniform_buffer_index as usize];
-        self.queue.write_buffer(uniform_buffer, uniform_offset, uniform_data);
-        let tile_data = &self.internal_tiles[tile_id];
-        let render_pass_desc = wgpu::RenderPassDescriptor {
+        let tile = &self.tiles[id];
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &tile_data.color_texture_view,
+                view: &tile.color_view,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -762,7 +578,7 @@ impl<I: Clone + Eq + Hash> renderer::Renderer<I> for Renderer<I> {
                 resolve_target: None,
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &tile_data.opacity_texture_view,
+                view: &tile.depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -770,78 +586,283 @@ impl<I: Clone + Eq + Hash> renderer::Renderer<I> for Renderer<I> {
                 stencil_ops: None,
             }),
             ..Default::default()
-        };
-
-        let mut managed_encoder = match &encoder {
-            Some(_) => None,
-            None => Some(self.device.create_command_encoder(&Default::default())),
-        };
-
-        let mut render_pass = match &mut managed_encoder {
-            Some(encoder) => encoder.begin_render_pass(&render_pass_desc),
-            None => encoder.unwrap().begin_render_pass(&render_pass_desc),
-        };
-
+        });
         render_pass.set_pipeline(&brush.pipeline);
-        render_pass.set_bind_group(0, uniform_bind_group, &[uniform_offset as wgpu::DynamicOffset]);
-        render_pass.set_bind_group(1, Some(&brush.bind_group), &[]);
-        render_pass.set_vertex_buffer(0, self.instance_buffer.slice(0..)); // TODO: Only draw visible stamps
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(1, &brush.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.stamp_buffer.as_ref().expect("buffer").slice(..));
         render_pass.draw(0..4, 0..self.stamp_count);
         drop(render_pass);
-
-        if let Some(encoder) = managed_encoder {
-            self.queue.submit([encoder.finish()]);
-        }
-
         Ok(())
     }
 
-    fn render_tile(&self, tile_id: &I, render_pass: &mut wgpu::RenderPass) -> Result<(), RendererError> {
-        let Some(tile_data) = self.internal_tiles.get(tile_id) else {
-            return Err(RendererError::IdNotProcessed);
+    fn render_tile(
+        &mut self,
+        id: &I,
+        transform: &[f32; 16],
+        target: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), Error> {
+        let Some(tile) = self.tiles.get(id) else {
+            return Err(Error::NoTile);
         };
 
+        {
+            let mut uniform_data = self.uniform_staging.write_buffer(
+                encoder,
+                &self.uniform_buffer,
+                0,
+                (size_of::<[f32; 16]>() as u64).try_into()?,
+            );
+            let uniform_data: &mut [f32] = bytemuck::cast_slice_mut(&mut uniform_data);
+            uniform_data[0..16].copy_from_slice(transform);
+        }
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+                resolve_target: None,
+            })],
+            ..Default::default()
+        });
         render_pass.set_pipeline(&self.copy_pipeline);
-        render_pass.set_bind_group(0, &tile_data.copy_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(1, &tile.copy_bind_group, &[]);
         render_pass.draw(0..4, 0..1);
+        drop(render_pass);
+        Ok(())
+    }
+
+    fn render_finish(&mut self) -> Result<(), Error> {
+        self.uniform_staging.finish();
         Ok(())
     }
 }
 
-impl<I: Eq + Hash> Renderer<I> {
-    fn make_texture_from_graph(&self, g: &[[f32; 2]]) -> wgpu::Texture {
-        let data: [u8; 256] = g.make_1d_data();
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Graph"),
-            format: wgpu::TextureFormat::R8Unorm,
-            dimension: wgpu::TextureDimension::D1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            size: wgpu::Extent3d {
-                width: data.len() as u32,
-                ..Default::default()
-            },
-            view_formats: &[],
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Stamp {
+    color: [f32; 4],
+    world_coords: [f32; 2],
+    size: f32,
+    flow: f32,
+    opacity: f32,
+}
+
+impl Stamp {
+    fn rect(&self) -> Rect {
+        let min = Vec2(
+            self.world_coords[0] - self.size / 2.0,
+            self.world_coords[1] - self.size / 2.0,
+        );
+
+        let max = Vec2(
+            self.world_coords[0] + self.size / 2.0,
+            self.world_coords[1] + self.size / 2.0,
+        );
+
+        Rect { min, max }
+    }
+}
+
+struct ActiveBrush {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    spacing: f32,
+    size: Dynamic,
+    flow: Dynamic,
+    opacity: Dynamic,
+    offset: [Dynamic; 2],
+}
+
+impl ActiveBrush {
+    fn new<I: Clone + Eq + Hash>(renderer: &StampBrushRenderer<I>, brush: &StampBrush) -> ActiveBrush {
+        let (pipeline, bind_group) = match &brush.tip {
+            BrushTip::Square { graph } | BrushTip::Circle { graph } => {
+                let texture = renderer.device.create_texture_with_data(
+                    &renderer.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("Tip depth map"),
+                        dimension: wgpu::TextureDimension::D1,
+                        format: wgpu::TextureFormat::R8Unorm,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        size: wgpu::Extent3d {
+                            width: 256,
+                            ..Default::default()
+                        },
+                        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &graph.make_1d_data::<u8, 256>(),
+                );
+                let bind_group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Square brush bind group"),
+                    layout: &renderer.common_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Sampler(&renderer.tip_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
+                        },
+                    ],
+                });
+                let pipeline = match &brush.tip {
+                    BrushTip::Square { .. } => renderer.square_pipeline.clone(),
+                    BrushTip::Circle { .. } => renderer.circle_pipeline.clone(),
+                    _ => unreachable!(),
+                };
+                (pipeline, bind_group)
+            }
+            BrushTip::Bitmap { width, height, data } => {
+                let texture = renderer.device.create_texture_with_data(
+                    &renderer.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("Tip depth map"),
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R8Unorm,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        size: wgpu::Extent3d {
+                            width: *width,
+                            height: *height,
+                            ..Default::default()
+                        },
+                        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &data,
+                );
+                let bind_group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Custom brush tip"),
+                    layout: &renderer.custom_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Sampler(&renderer.tip_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
+                        },
+                    ],
+                });
+                (renderer.custom_pipeline.clone(), bind_group)
+            }
+        };
+
+        Self {
+            pipeline,
+            bind_group,
+            spacing: brush.spacing,
+            size: brush.size.clone(),
+            flow: brush.flow.clone(),
+            opacity: brush.opacity.clone(),
+            offset: brush.offset.clone(),
+        }
+    }
+}
+
+struct InternalTileData {
+    color_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    copy_bind_group: wgpu::BindGroup,
+}
+
+impl InternalTileData {
+    fn new<I: Clone + Eq + Hash>(renderer: &StampBrushRenderer<I>, rect: &Rect) -> InternalTileData {
+        let extent = wgpu::Extent3d {
+            width: rect.size().0 as u32,
+            height: rect.size().1 as u32,
+            ..Default::default()
+        };
+        let color_texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Color texture"),
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
             mip_level_count: 1,
             sample_count: 1,
+            size: extent,
+            usage: wgpu::TextureUsages::empty()
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
         });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                aspect: wgpu::TextureAspect::All,
-                origin: wgpu::Origin3d::ZERO,
-                mip_level: 0,
-            },
-            bytemuck::cast_slice(&data),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(data.len() as u32),
-                ..Default::default()
-            },
-            wgpu::Extent3d {
-                width: data.len() as u32,
-                ..Default::default()
-            },
-        );
-        texture
+        let depth_texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth texture"),
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth16Unorm,
+            mip_level_count: 1,
+            sample_count: 1,
+            size: extent,
+            usage: wgpu::TextureUsages::empty()
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color_texture.create_view(&Default::default());
+        let depth_view = depth_texture.create_view(&Default::default());
+        Self {
+            copy_bind_group: renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Stroke layer copy bind group"),
+                layout: &renderer.copy_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Sampler(&renderer.copy_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    },
+                ],
+            }),
+            color_view,
+            depth_view,
+        }
+    }
+}
+
+struct StampBrushDynamicContext {
+    stroke_jitter: f32,
+    generator: rand::rngs::ThreadRng,
+}
+
+impl StampBrushDynamicContext {
+    fn new() -> StampBrushDynamicContext {
+        Self {
+            stroke_jitter: 0.0,
+            generator: rand::rng(),
+        }
+    }
+
+    fn roll_stroke(&mut self) {
+        self.stroke_jitter = self.generator.random();
+    }
+}
+
+impl DynamicContext for StampBrushDynamicContext {
+    fn jitter_stroke(&self) -> f32 {
+        todo!()
+    }
+
+    fn jitter_dab(&mut self) -> f32 {
+        self.generator.random()
     }
 }

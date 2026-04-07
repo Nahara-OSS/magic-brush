@@ -7,9 +7,13 @@ if [ -d out ]; then
 fi
 
 # Build
-wasm-pack build
+wasm-pack \
+    build \
+    --release
+
 deno bundle \
     --unstable-raw-imports \
     --minify \
+    --sourcemap \
     --outdir out \
     index.html

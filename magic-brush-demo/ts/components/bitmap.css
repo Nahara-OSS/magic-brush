@@ -1,0 +1,43 @@
+.bitmap-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    user-select: none;
+
+    > .bitmap-view {
+        border-collapse: collapse;
+        aspect-ratio: 1 / 1;
+        background-image: repeating-conic-gradient(#efefef 0 25%, #ffffff 0 50%);
+        background-size: 20px 20px;
+
+        > tbody > tr > td {
+            background-color: rgba(0 0 0 / calc(var(--value) * 100%));
+        }
+    }
+
+    > .color-picker {
+        position: relative;
+        height: 2rem;
+        background-image: repeating-conic-gradient(#efefef 0 25%, #ffffff 0 50%);
+        background-size: 20px 20px;
+
+        &::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-image: linear-gradient(to right, transparent 0%, #000000 100%);
+        }
+
+        > .selector {
+            position: absolute;
+            width: 5px;
+            height: 1.6rem;
+            box-sizing: border-box;
+            left: calc(var(--value) * 100%);
+            top: 50%;
+            translate: -50% -50%;
+            border: 1px solid #ff0000;
+        }
+    }
+}

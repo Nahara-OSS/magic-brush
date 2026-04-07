@@ -1,3 +1,8 @@
+pub mod graph;
+pub mod lerp;
+pub mod lnag;
+pub mod normalize;
+
 pub trait Vector2Like {
     type Scalar;
 
@@ -91,56 +96,5 @@ impl Matrix4x4Like for [f32; 16] {
             self[12] * other[2] + self[13] * other[6] + self[14] * other[10] * self[15] * other[14],
             self[12] * other[3] + self[13] * other[7] + self[14] * other[11] * self[15] * other[15],
         ]
-    }
-}
-
-pub trait Lerpable {
-    fn lerp(a: &Self, b: &Self, fraction: f32) -> Self;
-}
-
-impl Lerpable for f32 {
-    fn lerp(a: &Self, b: &Self, fraction: f32) -> Self {
-        a * (1.0 - fraction) + b * fraction
-    }
-}
-
-impl<const N: usize> Lerpable for [f32; N] {
-    fn lerp(a: &Self, b: &Self, fraction: f32) -> Self {
-        let mut result = *a;
-        let inv_frac = 1.0 - fraction;
-
-        for i in 0..N {
-            result[i] = a[i] * inv_frac + b[i] * fraction;
-        }
-
-        result
-    }
-}
-
-pub trait FromNormalized {
-    fn from_normalized(value: f32) -> Self;
-}
-
-impl FromNormalized for u8 {
-    fn from_normalized(value: f32) -> Self {
-        (value.clamp(0.0, 1.0) * 255.0) as u8
-    }
-}
-
-impl FromNormalized for i8 {
-    fn from_normalized(value: f32) -> Self {
-        (value.clamp(-1.0, 1.0) * 127.0) as i8
-    }
-}
-
-impl FromNormalized for f32 {
-    fn from_normalized(value: f32) -> Self {
-        value
-    }
-}
-
-impl FromNormalized for f64 {
-    fn from_normalized(value: f32) -> Self {
-        value as f64
     }
 }

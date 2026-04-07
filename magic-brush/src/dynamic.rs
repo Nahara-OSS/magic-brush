@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{graph::Graph, input::StylusInput, utils::Vector2Like};
+use crate::{
+    input::StylusInput,
+    utils::{graph::Graph, lnag::Vec2},
+};
 
 /// Brush dynamic settings controls the brush parameter based on stylus input events, like changing the size of the
 /// brush based on stylus pressure value for example.
@@ -63,7 +66,7 @@ pub struct Modifier {
     pub sensor: Sensor,
 
     /// The graph that maps the sensor value. See [`Graph`] for more details.
-    pub graph: Vec<[f32; 2]>,
+    pub graph: Vec<Vec2>,
 }
 
 impl Modifier {
@@ -129,13 +132,13 @@ impl Sensor {
             Sensor::Pressure => b.pressure,
             Sensor::Azimuth => todo!("azimuth"),
             Sensor::Altitude => todo!("altitude"),
-            Sensor::TiltX => (b.tilt[0] + 90.0) / 180.0,
-            Sensor::TiltY => (b.tilt[1] + 90.0) / 180.0,
+            Sensor::TiltX => (b.tilt.0 + 90.0) / 180.0,
+            Sensor::TiltY => (b.tilt.1 + 90.0) / 180.0,
             Sensor::Twist => b.twist / 360.0,
             Sensor::Distance { .. } => todo!("distance"),
             Sensor::Speed { max } => {
                 let Some(a) = a else { return 0.0 };
-                let distance = b.position.vec2_sub(&a.position).vec2_len();
+                let distance = (b.position - a.position).len();
                 let duration = b.timestamp - a.timestamp;
                 let raw_speed = distance / duration;
                 (raw_speed / *max).clamp(0.0, 1.0)

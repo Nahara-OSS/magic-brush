@@ -18,7 +18,6 @@ struct Fragment {
 fn circleFragment(v: Vertex) -> Fragment {
     let dist = distance(v.texture_coords * 2.0, vec2f(1.0));
     let value = textureSample(stamp_depthmap, stamp_sampler, dist).r * step(dist, 1.0);
-    let color = vec4f(1.0) * value;
     return Fragment(v.color * v.flow, v.opacity * value);
 }
 
@@ -26,6 +25,5 @@ fn circleFragment(v: Vertex) -> Fragment {
 fn squareFragment(v: Vertex) -> Fragment {
     let dist = max(abs(v.texture_coords.x * 2.0 - 1.0), abs(v.texture_coords.y * 2.0 - 1.0));
     let value = textureSample(stamp_depthmap, stamp_sampler, dist).r;
-    let color = vec4f(1.0) * value;
     return Fragment(v.color * v.flow, v.opacity * value);
 }

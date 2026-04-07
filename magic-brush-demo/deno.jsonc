@@ -1,10 +1,17 @@
 {
+    "fmt": {
+        "lineWidth": 120,
+        "indentWidth": 4
+    },
     "compilerOptions": {
         "lib": [
             "dom",
             "esnext"
-        ]
+        ],
+        "jsx": "react-jsx",
+        "jsxImportSource": "preact"
     },
     "imports": {
+        "preact": "npm:preact@^10.29.1"
     }
 }

@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 magic-brush = { version = "0.1.0", path = "../magic-brush" }
 raw-window-handle = "0.6.2"
 wasm-bindgen = "0.2.117"
-web-sys = { version = "0.3.77", features = ["DomRect", "Element", "HtmlCanvasElement", "OffscreenCanvas", "PointerEvent"] }
+web-sys = { version = "0.3.77", features = ["DomRect", "Element", "HtmlCanvasElement", "OffscreenCanvas", "PointerEvent", "console"] }
 wgpu = { version = "28.0.0", features = ["web", "webgpu"] }
 getrandom = { version = "0.4.2", default-features = false, features = [
     "wasm_js",

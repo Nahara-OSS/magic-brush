@@ -1,103 +1,33 @@
-use magic_brush::{
-    dynamic::{Dynamic, Modifier, Sensor},
-    input::StylusInput,
-    renderer::{self, Rect, Renderer, RendererFactory},
-    stamp::{self, BrushTip},
-};
-use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
+use std::{cell::RefCell, ops::DerefMut, rc::Rc, vec};
+
+use magic_brush::stamp::{self};
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::{JsError, prelude::wasm_bindgen};
 
 #[wasm_bindgen]
-pub struct App {
+#[derive(Clone)]
+pub struct Runtime(Rc<RuntimeInner>);
+
+struct RuntimeInner {
+    #[allow(dead_code)]
+    instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    html: web_sys::HtmlCanvasElement,
-    surface: wgpu::Surface<'static>,
-    brush: stamp::Brush,
-    color: [f32; 4],
-    renderer: Box<dyn renderer::Renderer<()>>,
-    copy_bind_group_layout: wgpu::BindGroupLayout,
+    copy_bind_group: wgpu::BindGroupLayout,
     copy_pipeline: wgpu::RenderPipeline,
-    canvas: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
-    pen_id: Option<i32>,
 }
 
 #[wasm_bindgen]
-impl App {
+impl Runtime {
     #[wasm_bindgen]
-    pub async fn create(canvas: web_sys::HtmlCanvasElement) -> Result<App, JsError> {
+    pub async fn create() -> Result<Runtime, JsError> {
         let instance = wgpu::Instance::default();
         let adapter = instance.request_adapter(&Default::default()).await?;
         let (device, queue) = adapter.request_device(&Default::default()).await?;
-        let brush = stamp::Brush {
-            tip: BrushTip::Circle {
-                graph: vec![[0.0, 1.0], [0.2, 1.0], [1.0, 0.0]],
-            },
-            size: Dynamic {
-                base: 6.0,
-                modifiers: vec![Modifier {
-                    sensor: Sensor::Pressure,
-                    graph: vec![[0.0, 0.8], [1.0, 1.0]],
-                }],
-            },
-            flow: Dynamic {
-                base: 1.0,
-                modifiers: vec![Modifier {
-                    sensor: Sensor::Pressure,
-                    graph: vec![[0.0, 0.1], [1.0, 0.6]],
-                }],
-            },
-            opacity: Dynamic {
-                base: 1.0,
-                modifiers: vec![Modifier {
-                    sensor: Sensor::Pressure,
-                    graph: vec![],
-                }],
-            },
-            offset: [
-                Dynamic {
-                    base: 1.0,
-                    modifiers: vec![
-                        Modifier {
-                            sensor: Sensor::JitterDab,
-                            graph: vec![[0.0, -1.0], [1.0, 1.0]],
-                        },
-                        Modifier {
-                            sensor: Sensor::Pressure,
-                            graph: vec![[0.0, 1.0], [1.0, 0.0]],
-                        },
-                    ],
-                },
-                Dynamic {
-                    base: 1.0,
-                    modifiers: vec![
-                        Modifier {
-                            sensor: Sensor::JitterDab,
-                            graph: vec![[0.0, -1.0], [1.0, 1.0]],
-                        },
-                        Modifier {
-                            sensor: Sensor::Pressure,
-                            graph: vec![[0.0, 1.0], [1.0, 0.0]],
-                        },
-                    ],
-                },
-            ],
-            ..Default::default()
-        };
-        let mut renderer = Box::new(stamp::Renderer::<()>::create(
-            device.clone(),
-            queue.clone(),
-            wgpu::TextureFormat::Rgba8Unorm,
-        ));
-        renderer.try_change_preset(&brush);
-
-        #[cfg(target_arch = "wasm32")]
-        let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let surface = panic!("magic-brush-demo must be packaged using wasm-pack");
 
         let copy_shader_module = device.create_shader_module(wgpu::include_wgsl!("./copy.wgsl"));
-        let copy_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
+        let copy_bind_group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Copy bind group layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -117,211 +47,374 @@ impl App {
                 },
             ],
         });
-
-        Ok(App {
-            surface,
-            brush,
-            color: [0.0, 0.0, 0.0, 1.0],
-            renderer,
-            canvas: None,
-            pen_id: None,
-            copy_pipeline: device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let copy_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Copy pipeline"),
+            cache: None,
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                cache: None,
-                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None,
-                    immediate_size: 0,
-                    bind_group_layouts: &[&copy_bind_group_layout],
-                })),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                vertex: wgpu::VertexState {
-                    module: &copy_shader_module,
-                    entry_point: Some("vertexShader"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &copy_shader_module,
-                    entry_point: Some("fragmentShader"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        write_mask: wgpu::ColorWrites::all(),
-                        blend: None,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                multisample: Default::default(),
-                depth_stencil: None,
-                multiview_mask: None,
+                bind_group_layouts: &[&copy_bind_group],
+                ..Default::default()
+            })),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            vertex: wgpu::VertexState {
+                module: &copy_shader_module,
+                entry_point: Some("vertexShader"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &copy_shader_module,
+                entry_point: Some("fragmentShader"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    write_mask: wgpu::ColorWrites::all(),
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent::OVER,
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                })],
             }),
-            copy_bind_group_layout,
+            depth_stencil: None,
+            multiview_mask: None,
+            multisample: Default::default(),
+        });
+
+        Ok(Runtime(Rc::new(RuntimeInner {
+            copy_bind_group,
+            copy_pipeline,
+            instance,
             device,
             queue,
-            html: canvas,
+        })))
+    }
+
+    #[wasm_bindgen(js_name = "createDocument")]
+    pub fn create_document(&self, name: String, width: u32, height: u32) -> Result<Document, JsError> {
+        Ok(Document(Rc::new(DocumentInner {
+            runtime: self.clone(),
+            data: RefCell::new(DocumentData {
+                name,
+                size: [width, height],
+                layers: vec![],
+            }),
+        })))
+    }
+
+    #[allow(unreachable_code)]
+    #[allow(unused_variables)]
+    #[wasm_bindgen(js_name = "createHtmlSurface")]
+    pub fn create_html_surface(&self, html: web_sys::HtmlCanvasElement) -> Result<Surface, JsError> {
+        #[cfg(target_arch = "wasm32")]
+        let surface = self
+            .0
+            .instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(html.clone()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let surface: wgpu::Surface<'static> = panic!("Only works on browser");
+
+        Ok(Surface {
+            runtime: self.clone(),
+            kind: SurfaceKind::Html,
+            html: Some(html),
+            offscreen: None,
+            inner: surface,
         })
     }
 
+    #[allow(unreachable_code)]
+    #[allow(unused_variables)]
+    #[wasm_bindgen(js_name = "createOffscreenSurface")]
+    pub fn create_offscreen_surface(&self, offscreen: web_sys::OffscreenCanvas) -> Result<Surface, JsError> {
+        #[cfg(target_arch = "wasm32")]
+        let surface = self
+            .0
+            .instance
+            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(offscreen.clone()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let surface: wgpu::Surface<'static> = panic!("Only works on browser");
+
+        Ok(Surface {
+            runtime: self.clone(),
+            kind: SurfaceKind::Offscreen,
+            html: None,
+            offscreen: Some(offscreen),
+            inner: surface,
+        })
+    }
+}
+
+#[wasm_bindgen]
+pub struct Surface {
+    runtime: Runtime,
+    kind: SurfaceKind,
+    html: Option<web_sys::HtmlCanvasElement>,
+    offscreen: Option<web_sys::OffscreenCanvas>,
+    inner: wgpu::Surface<'static>,
+}
+
+#[wasm_bindgen]
+#[derive(Clone, Copy)]
+pub enum SurfaceKind {
+    Html,
+    Offscreen,
+}
+
+#[wasm_bindgen]
+impl Surface {
     #[wasm_bindgen(getter)]
-    pub fn preset(&self) -> Result<JsValue, JsError> {
-        Ok(serde_wasm_bindgen::to_value(&self.brush)?)
+    pub fn kind(&self) -> SurfaceKind {
+        self.kind
     }
 
-    #[wasm_bindgen(setter)]
-    pub fn set_preset(&mut self, preset: JsValue) -> Result<(), JsError> {
-        self.brush = serde_wasm_bindgen::from_value(preset)?;
-        Ok(())
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn color(&self) -> Vec<JsValue> {
-        self.color.map(|v| JsValue::from_f64(v as f64)).into()
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_color(&mut self, value: Vec<JsValue>) -> Result<(), JsError> {
-        self.color = value
-            .into_iter()
-            .map(|v| v.as_f64().map(|v| v as f32))
-            .collect::<Option<Vec<f32>>>()
-            .ok_or(JsError::new("The array contains non-numerical value"))?
-            .try_into()
-            .map_err(|v: Vec<f32>| JsError::new(format!("Length mismatch: {} != 4", v.len()).as_str()))?;
-        Ok(())
-    }
-
+    /// Reconfigure the surface every time the canvas is resized.
     #[wasm_bindgen]
-    pub fn configure(&mut self, width: u32, height: u32) -> Result<(), JsError> {
-        if width * height == 0 {
-            return Err(JsError::new("Either width or height is zero"));
-        }
+    pub fn configure(&self) {
+        let (width, height) = match self.kind {
+            SurfaceKind::Html => self.html.as_ref().map(|c| (c.width(), c.height())).unwrap(),
+            SurfaceKind::Offscreen => self.offscreen.as_ref().map(|c| (c.width(), c.height())).unwrap(),
+        };
 
-        self.surface.configure(
-            &self.device,
+        self.inner.configure(
+            &self.runtime.0.device,
             &wgpu::SurfaceConfiguration {
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 width,
                 height,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                view_formats: vec![],
-                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: vec![],
                 present_mode: wgpu::PresentMode::AutoNoVsync,
                 desired_maximum_frame_latency: 2,
             },
         );
+    }
 
-        let canvas = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Canvas texture"),
+    #[wasm_bindgen(getter)]
+    pub fn html(&self) -> Option<web_sys::HtmlCanvasElement> {
+        self.html.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn offscreen(&self) -> Option<web_sys::OffscreenCanvas> {
+        self.offscreen.clone()
+    }
+}
+
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct Document(Rc<DocumentInner>);
+
+struct DocumentInner {
+    runtime: Runtime,
+    data: RefCell<DocumentData>,
+}
+
+struct DocumentData {
+    name: String,
+    size: [u32; 2],
+    layers: Vec<Layer>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum BrushPreset {
+    Stamp(stamp::StampBrush),
+}
+
+#[wasm_bindgen]
+impl Document {
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.0.data.borrow().name.clone()
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_name(&self, name: String) {
+        let mut data = self.0.data.borrow_mut();
+        data.deref_mut().name = name;
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.0.data.borrow().size[0]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> u32 {
+        self.0.data.borrow().size[1]
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> Vec<u32> {
+        self.0.data.borrow().size.clone().into()
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_size(&self, size: Vec<u32>) -> Result<(), JsError> {
+        let size: [u32; 2] = size.try_into().map_err(|_| JsError::new("Array length must be 2"))?;
+        let mut encoder = self.0.runtime.0.device.create_command_encoder(&Default::default());
+        let mut data = self.0.data.borrow_mut();
+        let old_size = data.size;
+        data.size = size;
+
+        for layer in &mut data.layers {
+            let mut layer_data = layer.0.data.borrow_mut();
+            let new_texture = self.0.runtime.0.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                dimension: wgpu::TextureDimension::D2,
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    ..Default::default()
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                view_formats: &[],
+                usage: wgpu::TextureUsages::empty()
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            });
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &layer_data.texture,
+                    aspect: wgpu::TextureAspect::All,
+                    origin: wgpu::Origin3d::ZERO,
+                    mip_level: 0,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &new_texture,
+                    aspect: wgpu::TextureAspect::All,
+                    origin: wgpu::Origin3d::ZERO,
+                    mip_level: 0,
+                },
+                wgpu::Extent3d {
+                    width: old_size[0].min(size[0]),
+                    height: old_size[1].min(size[1]),
+                    ..Default::default()
+                },
+            );
+            layer_data.copy_bind_group = self.0.runtime.0.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.0.runtime.0.copy_bind_group,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Sampler(&self.0.runtime.0.device.create_sampler(
+                            &wgpu::SamplerDescriptor {
+                                min_filter: wgpu::FilterMode::Linear,
+                                mag_filter: wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            },
+                        )),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&new_texture.create_view(&Default::default())),
+                    },
+                ],
+            });
+            layer_data.texture = new_texture;
+        }
+
+        self.0.runtime.0.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = "layers")]
+    pub fn layer_count(&self) -> usize {
+        self.0.data.borrow().layers.len()
+    }
+
+    /// Once you are done with the layer, don't forget to `free()` it.
+    #[wasm_bindgen(js_name = "layerAt")]
+    pub fn layer_at(&self, index: usize) -> Option<Layer> {
+        self.0.data.borrow().layers.get(index).cloned()
+    }
+
+    /// Make sure to `free()` the return value.
+    #[wasm_bindgen(js_name = "insertLayer")]
+    pub fn insert_layer(&self, index: usize, name: String) -> Result<Layer, JsError> {
+        let mut data = self.0.data.borrow_mut();
+
+        if index > data.layers.len() {
+            return Err(JsError::new("Index out of bounds"));
+        }
+
+        let texture = self.0.runtime.0.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
             format: wgpu::TextureFormat::Rgba8Unorm,
             dimension: wgpu::TextureDimension::D2,
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: data.size[0],
+                height: data.size[1],
                 ..Default::default()
             },
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             mip_level_count: 1,
             sample_count: 1,
             view_formats: &[],
+            usage: wgpu::TextureUsages::empty()
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
         });
-        let canvas_view = canvas.create_view(&Default::default());
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let copy_bind_group = self.0.runtime.0.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            layout: &self.copy_bind_group_layout,
+            layout: &self.0.runtime.0.copy_bind_group,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&self.device.create_sampler(&Default::default())),
+                    resource: wgpu::BindingResource::Sampler(&self.0.runtime.0.device.create_sampler(
+                        &wgpu::SamplerDescriptor {
+                            min_filter: wgpu::FilterMode::Linear,
+                            mag_filter: wgpu::FilterMode::Linear,
+                            ..Default::default()
+                        },
+                    )),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&canvas_view),
+                    resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
                 },
             ],
         });
+        let layer = Layer(Rc::new(LayerInner {
+            document: self.clone(),
+            data: RefCell::new(LayerData {
+                name,
+                texture,
+                copy_bind_group,
+            }),
+        }));
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &canvas_view,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-                resolve_target: None,
-            })],
-            ..Default::default()
-        });
-        drop(render_pass);
-        self.queue.submit([encoder.finish()]);
-        self.canvas = Some((canvas, canvas_view, bind_group));
+        data.layers.insert(index, layer.clone());
+        Ok(layer)
+    }
+
+    #[wasm_bindgen(js_name = "deleteLayer")]
+    pub fn delete_layer(&self, index: usize) -> Result<(), JsError> {
+        let mut data = self.0.data.borrow_mut();
+
+        if index >= data.layers.len() {
+            return Err(JsError::new("Index out of bounds"));
+        }
+
+        data.layers.remove(index);
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = "penDown")]
-    pub fn pen_down(&mut self, event: web_sys::PointerEvent) -> Result<(), JsError> {
-        if let None = self.canvas {
-            return Err(JsError::new("Canvas must be configured first"));
-        }
-
-        let None = self.pen_id else {
-            return Ok(());
-        };
-
-        self.pen_id = Some(event.pointer_id());
-        self.renderer.begin_new_stroke();
-        self.pen_move(event)
-    }
-
-    #[wasm_bindgen(js_name = "penMove")]
-    pub fn pen_move(&mut self, event: web_sys::PointerEvent) -> Result<(), JsError> {
-        let Some((canvas, _, copy_bind_group)) = &self.canvas else {
-            return Err(JsError::new("Canvas must be configured first"));
-        };
-
-        let Some(pen_id) = self.pen_id else {
-            return Ok(());
-        };
-
-        if pen_id != event.pointer_id() {
-            return Ok(());
-        }
-
-        let bounds = self.html.get_bounding_client_rect();
-        self.renderer.prepare_input(
-            &StylusInput {
-                timestamp: event.time_stamp() as f32,
-                position: [
-                    event.client_x() as f32 - bounds.x() as f32,
-                    event.client_y() as f32 - bounds.y() as f32,
-                ],
-                pressure: event.pressure(),
-                tilt: [event.tilt_x() as f32, event.tilt_y() as f32],
-                twist: event.twist() as f32,
-            },
-            &self.color,
-        )?;
-
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        let surface_texture = self.surface.get_current_texture()?;
-
-        self.renderer.prepare_tile(
-            &(),
-            &Rect {
-                x: 0,
-                y: 0,
-                width: canvas.width(),
-                height: canvas.height(),
-            },
-            &mut encoder,
-        )?;
-
+    #[wasm_bindgen]
+    pub fn render(&self, surface: &Surface) -> Result<(), JsError> {
+        let data = self.0.data.borrow();
+        let surface_texture = surface.inner.get_current_texture()?;
+        let mut encoder = self.0.runtime.0.device.create_command_encoder(&Default::default());
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &surface_texture.texture.create_view(&Default::default()),
                 ops: wgpu::Operations {
@@ -333,97 +426,47 @@ impl App {
             })],
             ..Default::default()
         });
-        render_pass.set_pipeline(&self.copy_pipeline);
-        render_pass.set_bind_group(0, copy_bind_group, &[]);
-        render_pass.draw(0..4, 0..1);
-        self.renderer.render_tile(&(), &mut render_pass)?;
-        drop(render_pass);
 
-        self.queue.submit([encoder.finish()]);
+        render_pass.set_pipeline(&self.0.runtime.0.copy_pipeline);
+
+        for layer in &data.layers {
+            let layer_data = layer.0.data.borrow();
+            render_pass.set_bind_group(0, &layer_data.copy_bind_group, &[]);
+            render_pass.draw(0..4, 0..1);
+        }
+
+        drop(render_pass);
+        self.0.runtime.0.queue.submit([encoder.finish()]);
         surface_texture.present();
         Ok(())
     }
+}
 
-    #[wasm_bindgen(js_name = "penUp")]
-    pub fn pen_up(&mut self, event: web_sys::PointerEvent) -> Result<(), JsError> {
-        let Some((canvas, canvas_view, copy_bind_group)) = &self.canvas else {
-            return Err(JsError::new("Canvas must be configured first"));
-        };
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct Layer(Rc<LayerInner>);
 
-        let Some(pen_id) = self.pen_id else {
-            return Ok(());
-        };
+struct LayerInner {
+    document: Document,
+    data: RefCell<LayerData>,
+}
 
-        if pen_id != event.pointer_id() {
-            return Ok(());
-        }
+struct LayerData {
+    name: String,
+    texture: wgpu::Texture,
+    copy_bind_group: wgpu::BindGroup,
+}
 
-        let bounds = self.html.get_bounding_client_rect();
-        self.renderer.prepare_input(
-            &StylusInput {
-                timestamp: event.time_stamp() as f32,
-                position: [
-                    event.client_x() as f32 - bounds.x() as f32,
-                    event.client_y() as f32 - bounds.y() as f32,
-                ],
-                pressure: event.pressure(),
-                tilt: [event.tilt_x() as f32, event.tilt_y() as f32],
-                twist: event.twist() as f32,
-            },
-            &self.color,
-        )?;
+#[wasm_bindgen]
+impl Layer {
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.0.data.borrow().name.clone()
+    }
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        let surface_texture = self.surface.get_current_texture()?;
-
-        self.renderer.prepare_tile(
-            &(),
-            &Rect {
-                x: 0,
-                y: 0,
-                width: canvas.width(),
-                height: canvas.height(),
-            },
-            &mut encoder,
-        )?;
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: canvas_view,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-                resolve_target: None,
-            })],
-            ..Default::default()
-        });
-        self.renderer.render_tile(&(), &mut render_pass)?;
-        drop(render_pass);
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &surface_texture.texture.create_view(&Default::default()),
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-                resolve_target: None,
-            })],
-            ..Default::default()
-        });
-        render_pass.set_pipeline(&self.copy_pipeline);
-        render_pass.set_bind_group(0, copy_bind_group, &[]);
-        render_pass.draw(0..4, 0..1);
-        drop(render_pass);
-
-        self.queue.submit([encoder.finish()]);
-        surface_texture.present();
-        self.pen_id = None;
-        Ok(())
+    #[wasm_bindgen(setter)]
+    pub fn set_name(&self, name: String) {
+        let mut data = self.0.data.borrow_mut();
+        data.name = name;
     }
 }
