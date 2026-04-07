@@ -5,12 +5,20 @@ use crate::{
     utils::{graph::Graph, lnag::Vec2},
 };
 
-/// Brush dynamic settings controls the brush parameter based on stylus input events, like changing the size of the
-/// brush based on stylus pressure value for example.
+/// Brush dynamic settings for dynamically changing parameters.
+///
+/// Brush dymamic controls the brush parameter based on stylus input events, like changing the size of the brush based
+/// on stylus pressure value for example. Each dynamic have base value, which will be modified by a list of modifiers.
+/// Note that unless the modifier graph is a linear graph, the order of modifiers is important - the first modifier will
+/// be applied to base value first.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Dynamic {
-    /// The base value of this dynamic settings. The value will then be passed through multiple modifiers.
+    /// The base value of this dynamic settings.
     pub base: f32,
+
+    /// A list of modifiers to apply.
+    ///
+    /// The modifiers are applied from the first to last element.
     pub modifiers: Vec<Modifier>,
 }
 
@@ -75,58 +83,87 @@ impl Modifier {
     }
 }
 
+/// Stylus sensor type
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Sensor {
+    /// Normalized logical pressure
+    ///
     /// Use logical pressure in normalized range (0.00 to 1.00).
     #[serde(rename = "pressure")]
     Pressure,
 
+    /// Azimuth of stylus
+    ///
     /// The stylus orientation/facing direction, normalized from 0 -> 360 to 0.00 -> 1.00 range.
     #[serde(rename = "azimuth")]
     Azimuth,
 
+    /// Altitude of stylus
+    ///
     /// The angle of stylus to the drawing plane, normalized from 0 -> 90 to 0.00 -> 1.00 range.
     #[serde(rename = "altitude")]
     Altitude,
 
+    /// Tilt X angle of stylus
+    ///
     /// The tilt angle of the stylus along X axis, normalized from -90 -> +90 to 0.00 -> 1.00 range.
     #[serde(rename = "tiltX")]
     TiltX,
 
+    /// Tilt Y angle of stylus
+    ///
     /// The tilt angle of the stylus along Y axis, normalized from -90 -> +90 to 0.00 -> 1.00 range.
     #[serde(rename = "tiltY")]
     TiltY,
 
+    /// Twist/barrel rotation of stylus
+    ///
     /// The twist/rotation of the stylus around its main axis, normalized from 0 -> 360 to 0.00 -> 1.00 range.
     #[serde(rename = "twist")]
     Twist,
 
+    /// Travelling distance from the start of stroke
+    ///
     /// The travelled distance of the stylus since the start of the stroke, divided by maximum value and clamped between
     /// 0.00 -> 1.00 range.
     #[serde(rename = "distance")]
     Distance { max: f32 },
 
+    /// Stylus movement speed
+    ///
     /// The movement speed of the stylus, divded by maximum speed and clamped between 0.00 -> 1.00 range.
     #[serde(rename = "speed")]
     Speed { max: f32 },
 
+    /// Stylus elapsed time
+    ///
     /// The time elapsed since the start of the stroke, divided by maximum value and clamped between 0.00 -> 1.00 range.
     #[serde(rename = "time")]
     Time { max: f32 },
 
-    /// A random value in 0.00 -> 1.00 range selected at the start of the stroke.
+    /// Random value per stroke
+    ///
+    /// A random value in 0.00 -> 1.00 range selected at the start of the stroke. This value is picked randomly at the
+    /// start of a stroke, and it applies to entire stroke.
     #[serde(rename = "jitterStroke")]
     JitterStroke,
 
-    /// A random value in 0.00 -> 1.00 range for each time this sensor is sampled.
+    /// Random value per dab/stamp
+    ///
+    /// A random value in 0.00 -> 1.00 range for each time this sensor is sampled. In other words, everytime the brush
+    /// renderer requested a value from this sensor, it will returns a random value.
     #[serde(rename = "jitterDab")]
     JitterDab,
 }
 
 impl Sensor {
+    /// Derive sensor value from stylus events
+    ///
     /// Derive sensor value that's guaranteed to be inside 0.00 -> 1.00 range from either a single or a pair of stylus
     /// input and context. The result is usually passed through a graph before multiplying with base value (or previous
     /// value if there are multiple modifiers).
+    ///
+    /// If there is no information on previous stylus event, the parameter `a` can be [`None`].
     pub fn derive(&self, ctx: &mut dyn DynamicContext, a: Option<&StylusInput>, b: &StylusInput) -> f32 {
         match self {
             Sensor::Pressure => b.pressure,

@@ -5,22 +5,34 @@ use crate::utils::{
     lnag::Vec2,
 };
 
-/// Struct for stylus input event data. May be serialized or deserialized with [`serde`].
+/// Struct for stylus input event data
+///
+/// May be serialized or deserialized with [`serde`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StylusInput {
+    /// Stylus event timestamp
+    ///
     /// Timestamp of the stylus input event, measured in seconds since the start of the brush stroke.
     pub timestamp: f32,
 
+    /// Stylus position
+    ///
     /// The position of the stylus input in canvas coordinates.
     pub position: Vec2,
 
+    /// Stylus normalized pressure
+    ///
     /// The normalized logical pressure in 0.00 -> 1.00 range.
     pub pressure: f32,
 
+    /// Stylus XY tilt
+    ///
     /// The tilt of the stylus along X and Y axes, respectively. Each value is measured in degrees and clamped between
     /// -90 -> +90 degrees.
     pub tilt: Vec2,
 
+    /// Stylus twist/barrel rotation
+    ///
     /// The twist/barrel rotation angle measured in degrees, clamped between 0 -> 360 degrees.
     pub twist: f32,
 }
