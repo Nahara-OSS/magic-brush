@@ -12,6 +12,8 @@ use magic_brush::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Assume you already know how to use wgpu
+    // Here we just make a texture to draw into, and a buffer to copy result from that texture
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))?;
@@ -37,6 +39,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
     });
 
+    // Make a new brush preset here
+    // Or maybe load the brush preset from JSON with serde_json
     let brush = Brush::Stamp(StampBrush {
         tip: BrushTip::Circle {
             graph: vec![Vec2(0.0, 1.0), Vec2(0.8, 1.0), Vec2(1.0, 0.0)],
@@ -51,8 +55,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         ..Default::default()
     });
 
+    // Make a new brush renderer
+    // wgpu::Device and wgpu::Queue are reference counters so it's fine to clone here (maybe)
     let mut renderer = BrushRenderer::<()>::new(device.clone(), queue.clone(), output_texture.format());
+
+    // Make sure to assign preset to the renderer first
     renderer.use_preset(&brush)?;
+
+    // Begin a new stroke with Renderer::new_stroke()
+    // use_preset() indlrectly calls new_stroke() anyways so there is no need to call it here
+    // renderer.new_stroke();
+
+    // Supply one or more stylus inputs to the renderer
+    // Here we just draw from (100; 100) to (1000; 1000) while increasing the logical pressure value from 0 to 1
     renderer.next_input(&StylusInput {
         timestamp: 0.0,
         position: Vec2(100.0, 100.0),
@@ -68,7 +83,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         twist: 0.0,
     })?;
 
+    // This part is where we encode command buffer and submit it to actually draw something
     let mut encoder = device.create_command_encoder(&Default::default());
+
+    // First we clear our output texture with solid white color
     let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &output_texture.create_view(&Default::default()),
@@ -82,7 +100,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         ..Default::default()
     });
     drop(render_pass);
+
+    // Here we begin putting our brush renderer to rendering phase
     renderer.render_begin()?;
+
+    // Then we get the renderer to prepare to render to 1024x1024 texture
     renderer.render_input(
         &(),
         &Rect {
@@ -91,6 +113,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         &mut encoder,
     )?;
+
+    // And finally, we draw the stroke to texture view of output texture
+    // In reality, applications would call render_finish(), then submit the command buffer and done here.
     let identity = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
@@ -100,7 +125,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         &output_texture.create_view(&Default::default()),
         &mut encoder,
     )?;
+
+    // Finalize the renderer.
+    // After this function is called, render_begin() must not be called until the command buffer is submitted.
     renderer.render_finish()?;
+
+    // Here we just copy content of texture to output buffer so we can read the image data.
+    // Typically it would be something like presenting the surface texture.
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: &output_texture,
@@ -122,7 +153,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             ..Default::default()
         },
     );
+
+    // Submit the command buffer.
     queue.submit([encoder.finish()]);
+
+    // This part is for obtaining the content of texture and output it as PPM image.
+    // Use PPM image viewer to open result.ppm
     staging_output.clone().map_async(wgpu::MapMode::Read, .., move |r| {
         r.unwrap();
         let data = staging_output.get_mapped_range(..);
@@ -138,5 +174,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     });
+
     Ok(())
 }
