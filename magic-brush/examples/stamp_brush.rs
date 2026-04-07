@@ -3,10 +3,11 @@
 use std::{error::Error, fs::File, io::Write};
 
 use magic_brush::{
+    all::{Brush, BrushRenderer},
     dynamic::{Dynamic, Modifier, Sensor},
     input::StylusInput,
     renderer::Renderer,
-    stamp::{BrushTip, StampBrush, StampBrushRenderer},
+    stamp::{BrushTip, StampBrush},
     utils::lnag::{Rect, Vec2},
 };
 
@@ -36,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
     });
 
-    let brush = StampBrush {
+    let brush = Brush::Stamp(StampBrush {
         tip: BrushTip::Circle {
             graph: vec![Vec2(0.0, 1.0), Vec2(0.8, 1.0), Vec2(1.0, 0.0)],
         },
@@ -48,9 +49,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             }],
         },
         ..Default::default()
-    };
+    });
 
-    let mut renderer = StampBrushRenderer::<()>::new(device.clone(), queue.clone(), output_texture.format());
+    let mut renderer = BrushRenderer::<()>::new(device.clone(), queue.clone(), output_texture.format());
     renderer.use_preset(&brush)?;
     renderer.next_input(&StylusInput {
         timestamp: 0.0,

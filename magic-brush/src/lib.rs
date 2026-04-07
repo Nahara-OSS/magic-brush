@@ -4,32 +4,29 @@
 //! This library is not meant to be a plug and play solution (as in you just create a "project" and build your
 //! application around Magic Brush). Your application is supposed to manage the project, resources and layers, while
 //! Magic Brush's purpose is to implement renderers that consume stylus input events, then draw the brush stroke using
-//! [`wgpu::RenderPass`].
+//! [`wgpu::CommandEncoder`].
 //!
-//! The common way you'd use this library is as follows:
+//! A typical usage of this library is as follows:
 //!
-//! - Create [`wgpu::Texture`] for storing the stroke. The texture can be a raster layer in your drawing application, or
-//!   it can be your entire canvas.
-//! - Create one or more of brush renderers. Magic Brush may support other type of brushes in the future, but for now,
-//!   you might be able to get away with initializing [`stamp::Renderer`] only. The proper way is to make a list of
-//!   [`Box<renderer::Renderer>`] ([`std::rc::Rc`] may also be used for storing active renderer).
-//! - Prepare the renderer with [`renderer::Renderer::try_change_preset`]. Keep going through all brush renderers until
-//!   the function returns [`true`], which at this point, you've identified the brush renderer to use.
-//! - Reset the state of renderer with [`renderer::Renderer::begin_new_stroke`]. Call this everytime a new stroke need
-//!   to be drawn.
-//! - Every time a new [`input::StylusInput`] is received:
-//!   - Update the state of renderer by using [`renderer::Renderer::prepare_input`] with received stylus input event.
-//!     Note that this will also discard the state that was prepared for previous input. The returned [`renderer::Rect`]
-//!     rectangular area will be used for selecting which tiles should be passed to
-//!     [`renderer::Renderer::prepare_tile`].
-//!   - Call [`renderer::Renderer::prepare_tile`] for each tile intersecting the [`renderer::Rect`] returned from
-//!     [`renderer::Renderer::prepare_input`]. The tile ID will be used to distinguish between each tile (and may be
-//!     used by brush renderer to store the tile-specific state internally).
-//!   - If the stroke is still being drawn, [`renderer::Renderer::render_tile`] may be used on surface texture to
-//!     preview the content.
-//! - At the end of the stroke (eg: on stylus up), [`renderer::Renderer::render_tile`] should be used to draw the
-//!   content to texture for storage.
+//! - Create [`wgpu::Texture`] to store the result.
+//! - Create brush preset and brush renderer. [`all::Brush`] and [`all::BrushRenderer`] is a good staring point.
+//!   - To use a specific brush type, check out [`stamp`] (more will come in the future).
+//! - Assign the preset to brush renderer with [`renderer::Renderer::use_preset`].
+//! - To draw a stroke:
+//!   - Call [`renderer::Renderer::new_stroke`] to reset everything but active preset.
+//!   - Call [`renderer::Renderer::next_input`] when received an input event. May be called multiple times
+//!     consecutively.
+//!   - Call [`renderer::Renderer::render_begin`] to begin rendering.
+//!   - Call [`renderer::Renderer::render_input`] on each affected tiles to render the input to internal texture/buffer.
+//!   - Call [`renderer::Renderer::render_finish`] to finalize everything.
+//!   - Submit the encoded command buffer. This must be done before calling [`renderer::Renderer::render_begin`] again.
+//! - To display (or draw) current stroke to target [`wgpu::TextureView`]:
+//!   - Call [`renderer::Renderer::render_begin`] to begin rendering.
+//!   - Call [`renderer::Renderer::render_tile`] to draw to target texture view.
+//!   - Call [`renderer::Renderer::render_finish`] to finalize everything.
+//!   - Submit the encoded command buffer. Just like drawing a stroke, this must be done before begin rendering again.
 
+pub mod all;
 pub mod dynamic;
 pub mod input;
 pub mod renderer;

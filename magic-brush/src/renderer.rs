@@ -77,7 +77,8 @@ pub trait Renderer<P, I: Clone + Eq + Hash> {
     /// Draw current stroke to texture view.
     ///
     /// This function basically take whatever stored to internal texture/buffer from [`Renderer::render_input`] and
-    /// render it to [`wgpu::TextureView`].
+    /// render it to [`wgpu::TextureView`]. The 4x4 transformation matrix can be used to transform the quad that is
+    /// covering entire viewport (which is useful for displaying the stroke preview to surface for example).
     fn render_tile(
         &mut self,
         id: &I,
