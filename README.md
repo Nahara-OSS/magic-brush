@@ -9,6 +9,10 @@ Magic Brush is meant to be used as a library: Your app is supposed to handle the
 device initialization and managing textures/artwork data, while Magic Brush only
 handle the part that draws the stroke by writing to command buffer encoder.
 
+Magic Brush is mainly designed for tile-based applications in mind, but that
+doesn't stop applications from using this library to draw the brush stroke to
+one giant texture.
+
 ## Packages overview
 
 - `magic-brush`: The main Rust library
