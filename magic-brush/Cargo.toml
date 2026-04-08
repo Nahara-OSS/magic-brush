@@ -6,9 +6,12 @@ edition = "2024"
 [dependencies]
 bytemuck = "1.25.0"
 rand = "0.10.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_bytes = "0.11.19"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_bytes = { version = "0.11.19", optional = true }
 wgpu = "28.0.0"
+
+[features]
+serde = ["dep:serde", "dep:serde_bytes"]
 
 [dev-dependencies]
 pollster = "0.4.0"

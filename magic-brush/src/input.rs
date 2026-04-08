@@ -1,3 +1,4 @@
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::utils::{
@@ -6,9 +7,8 @@ use crate::utils::{
 };
 
 /// Struct for stylus input event data
-///
-/// May be serialized or deserialized with [`serde`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct StylusInput {
     /// Stylus event timestamp
     ///

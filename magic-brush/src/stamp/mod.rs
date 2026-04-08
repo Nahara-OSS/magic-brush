@@ -21,7 +21,6 @@
 use std::{collections::HashMap, hash::Hash, result::Result};
 
 use rand::RngExt;
-use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
 use crate::{
@@ -34,8 +33,11 @@ use crate::{
     },
 };
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// Stamp-based brush preset. May be serialized or deserialized with [`serde`].
-#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct StampBrush {
     /// The brush tip that will be used for stamping to stroke layer.
     pub tip: BrushTip,
@@ -70,10 +72,10 @@ impl Default for StampBrush {
 }
 
 /// The shape of brush tip.
-#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum BrushTip {
     /// Use square-shaped brush tip.
-    #[serde(rename = "square")]
+    #[cfg_attr(feature = "serde", serde(rename = "square"))]
     Square {
         /// The depth graph for square stamp. The input value goes from the center to the edge of square. The output
         /// value is the grayscale value of the brush tip.
@@ -81,7 +83,7 @@ pub enum BrushTip {
     },
 
     /// Use circle-shaped brush tip.
-    #[serde(rename = "circle")]
+    #[cfg_attr(feature = "serde", serde(rename = "circle"))]
     Circle {
         /// The depth graph for circular stamp. The input value goes from the center to the edge of circle. The output
         /// value is the grayscale value of the brush tip.
@@ -91,7 +93,7 @@ pub enum BrushTip {
     /// Use brush tip with custom shape defined in grayscale bitmap data. The size of bitmap data will be scaled so that
     /// it matches with size parameter of the brush. In other words, the size of bitmap defines the resolution of the
     /// brush tip, not the size of it.
-    #[serde(rename = "bitmap")]
+    #[cfg_attr(feature = "serde", serde(rename = "bitmap"))]
     Bitmap {
         /// The width of bitmap data.
         width: u32,
@@ -101,7 +103,7 @@ pub enum BrushTip {
 
         /// The grayscale bitmap data for bitmap-based brush tip. The length of data must be equals to
         /// [`BrushTip::Bitmap::width`] * [`BrushTip::Bitmap::height`].
-        #[serde(with = "serde_bytes")]
+        #[cfg_attr(feature = "serde", serde(with = "serde_bytes"))]
         data: Box<[u8]>,
     },
 }

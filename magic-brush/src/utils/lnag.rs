@@ -4,12 +4,14 @@
 
 use std::ops::{Add, Div, Mul, Sub};
 
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::utils::lerp::Lerpable;
 
 /// A two-component vector.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Vec2(pub f32, pub f32);
 
 impl Vec2 {
@@ -80,7 +82,8 @@ impl From<[f32; 2]> for Vec2 {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Rect {
     pub min: Vec2,
     pub max: Vec2,

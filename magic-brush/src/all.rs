@@ -5,6 +5,7 @@
 
 use std::hash::Hash;
 
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -15,9 +16,9 @@ use crate::{
 };
 
 /// An enum with all brush types implemented in Nahara's Magic Brush.
-#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Brush {
-    #[serde(rename = "stamp")]
+    #[cfg_attr(feature = "serde", serde(rename = "stamp"))]
     Stamp(StampBrush),
 }
 
