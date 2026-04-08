@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     input::StylusInput,
-    renderer::{Error, Renderer},
-    stamp::{StampBrush, StampBrushRenderer},
+    renderer::{Error, RenderPhase, Renderer},
+    stamp::{StampBrush, StampBrushRenderer, StampRenderPhase},
     utils::lnag::Rect,
 };
 
@@ -31,7 +31,14 @@ enum ActiveRenderer {
     Stamp,
 }
 
-impl<I: Clone + Eq + Hash> Renderer<Brush, I> for BrushRenderer<I> {
+impl<I: Clone + Eq + Hash> Renderer for BrushRenderer<I> {
+    type Preset = Brush;
+    type Id = I;
+    type Phase<'phase>
+        = BrushRenderPhase<'phase, Self::Id>
+    where
+        Self: 'phase;
+
     fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self {
             active: ActiveRenderer::None,
@@ -45,8 +52,6 @@ impl<I: Clone + Eq + Hash> Renderer<Brush, I> for BrushRenderer<I> {
                 self.active = ActiveRenderer::Stamp;
                 self.stamp.use_preset(preset)
             }
-            #[allow(unreachable_patterns)]
-            _ => todo!(),
         }
     }
 
@@ -57,44 +62,44 @@ impl<I: Clone + Eq + Hash> Renderer<Brush, I> for BrushRenderer<I> {
         }
     }
 
-    fn next_input(&mut self, input: &StylusInput, color: [f32; 3]) -> Result<Rect, Error> {
+    fn begin_render<'phase, 'input, T: IntoIterator<Item = &'input StylusInput>>(
+        &'phase mut self,
+        encoder: &'phase mut wgpu::CommandEncoder,
+        color: &[f32; 3],
+        inputs: T,
+    ) -> Result<Self::Phase<'phase>, Error> {
         match self.active {
             ActiveRenderer::None => Err(Error::NoPreset),
-            ActiveRenderer::Stamp => self.stamp.next_input(input, color),
+            ActiveRenderer::Stamp => self
+                .stamp
+                .begin_render(encoder, color, inputs)
+                .map(BrushRenderPhase::Stamp),
+        }
+    }
+}
+
+pub enum BrushRenderPhase<'phase, I: Clone + Eq + Hash> {
+    Stamp(StampRenderPhase<'phase, I>),
+}
+
+impl<'phase, I: Clone + Eq + Hash> RenderPhase<'phase> for BrushRenderPhase<'phase, I> {
+    type Id = I;
+
+    fn bounds(&self) -> Option<Rect> {
+        match self {
+            BrushRenderPhase::Stamp(phase) => phase.bounds(),
         }
     }
 
-    fn render_begin(&mut self) -> Result<(), Error> {
-        match self.active {
-            ActiveRenderer::None => Err(Error::NoPreset),
-            ActiveRenderer::Stamp => self.stamp.render_begin(),
+    fn process(&mut self, id: &I, rect: &Rect) -> Result<(), Error> {
+        match self {
+            BrushRenderPhase::Stamp(phase) => phase.process(id, rect),
         }
     }
 
-    fn render_input(&mut self, id: &I, rect: &Rect, encoder: &mut wgpu::CommandEncoder) -> Result<(), Error> {
-        match self.active {
-            ActiveRenderer::None => Err(Error::NoPreset),
-            ActiveRenderer::Stamp => self.stamp.render_input(id, rect, encoder),
-        }
-    }
-
-    fn render_tile(
-        &mut self,
-        id: &I,
-        transform: &[f32; 16],
-        target: &wgpu::TextureView,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<(), Error> {
-        match self.active {
-            ActiveRenderer::None => Err(Error::NoPreset),
-            ActiveRenderer::Stamp => self.stamp.render_tile(id, transform, target, encoder),
-        }
-    }
-
-    fn render_finish(&mut self) -> Result<(), Error> {
-        match self.active {
-            ActiveRenderer::None => Err(Error::NoPreset),
-            ActiveRenderer::Stamp => self.stamp.render_finish(),
+    fn draw(&mut self, id: &I, transform: &[f32; 16], target: &wgpu::TextureView) -> Result<(), Error> {
+        match self {
+            BrushRenderPhase::Stamp(phase) => phase.draw(id, transform, target),
         }
     }
 }

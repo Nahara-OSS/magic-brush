@@ -27,7 +27,7 @@ use wgpu::util::DeviceExt;
 use crate::{
     dynamic::{Dynamic, DynamicArray, DynamicContext},
     input::StylusInput,
-    renderer::{Error, Renderer},
+    renderer::{Error, RenderPhase, Renderer},
     utils::{
         graph::Graph,
         lnag::{Rect, Vec2},
@@ -137,13 +137,18 @@ pub struct StampBrushRenderer<I: Clone + Eq + Hash> {
     tiles: HashMap<I, InternalTileData>,
     brush: Option<ActiveBrush>,
     last_input: Option<StylusInput>,
-    stamp_queue: Vec<Stamp>,
     stamp_buffer: Option<wgpu::Buffer>,
-    stamp_count: u32,
     jitter: StampBrushDynamicContext,
 }
 
-impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
+impl<I: Clone + Eq + Hash> Renderer for StampBrushRenderer<I> {
+    type Preset = StampBrush;
+    type Id = I;
+    type Phase<'phase>
+        = StampRenderPhase<'phase, Self::Id>
+    where
+        Self: 'phase;
+
     fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let vertex_shader_module = device.create_shader_module(wgpu::include_wgsl!("./vertex.wgsl"));
         let common_shader_module = device.create_shader_module(wgpu::include_wgsl!("./common.wgsl"));
@@ -425,9 +430,7 @@ impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
             tiles: HashMap::new(),
             brush: None,
             last_input: None,
-            stamp_queue: Vec::with_capacity(1024),
             stamp_buffer: None,
-            stamp_count: 0,
             jitter: StampBrushDynamicContext::new(),
 
             device,
@@ -447,200 +450,106 @@ impl<I: Clone + Eq + Hash> Renderer<StampBrush, I> for StampBrushRenderer<I> {
         }
 
         self.last_input = None;
-        self.stamp_queue.clear();
         self.jitter.roll_stroke();
         Ok(())
     }
 
-    fn next_input(&mut self, input: &StylusInput, color: [f32; 3]) -> Result<Rect, Error> {
+    fn begin_render<'phase, 'input, T: IntoIterator<Item = &'input StylusInput>>(
+        &'phase mut self,
+        encoder: &'phase mut wgpu::CommandEncoder,
+        color: &[f32; 3],
+        inputs: T,
+    ) -> Result<Self::Phase<'phase>, Error> {
         let Some(brush) = &self.brush else {
             return Err(Error::NoPreset);
         };
 
-        if let Some(last_input) = &self.last_input {
-            let mut last_input = last_input.clone();
-            let mut bounds: Option<Rect> = None;
-
-            while (input.position - last_input.position).len() >= brush.spacing {
-                let vector = input.position - last_input.position;
-                let lerp_fraction = brush.spacing / vector.len();
-                let next_input = StylusInput::lerp(&last_input, input, lerp_fraction);
-                let stamp = Stamp {
-                    color: [color[0], color[1], color[2], 1.0],
-                    world_coords: (next_input.position
-                        + brush
-                            .offset
-                            .derive(&mut self.jitter, Some(&last_input), &next_input)
-                            .into())
-                    .into(),
-                    size: brush.size.derive(&mut self.jitter, Some(&last_input), &next_input),
-                    flow: brush.flow.derive(&mut self.jitter, Some(&last_input), &next_input),
-                    opacity: brush.opacity.derive(&mut self.jitter, Some(&last_input), &next_input),
-                };
-                match &mut bounds {
-                    Some(bounds) => bounds.expand_mut(stamp.rect()),
-                    None => bounds = Some(stamp.rect()),
-                };
-                self.stamp_queue.push(stamp);
-                last_input = next_input;
-            }
-
-            self.last_input = Some(last_input);
-            Ok(bounds.unwrap_or(Default::default()))
-        } else {
-            let stamp = Stamp {
-                color: [color[0], color[1], color[2], 1.0],
-                world_coords: (input.position + brush.offset.derive(&mut self.jitter, None, input).into()).into(),
-                size: brush.size.derive(&mut self.jitter, None, input),
-                flow: brush.flow.derive(&mut self.jitter, None, input),
-                opacity: brush.opacity.derive(&mut self.jitter, None, input),
-            };
-
-            let rect = stamp.rect();
-            self.last_input = Some(input.clone());
-            self.stamp_queue.push(stamp);
-            Ok(rect)
-        }
-    }
-
-    fn render_begin(&mut self) -> Result<(), Error> {
+        let mut stamps = Vec::with_capacity(256);
+        let mut bounds: Option<Rect> = None;
         self.uniform_staging.recall();
 
-        // We use the emptiness of stamp queue to determine whether we need to write instance buffer
-        if !self.stamp_queue.is_empty() {
-            let required_size = size_of::<Stamp>() * self.stamp_queue.len();
-            let current_size = self.stamp_buffer.as_ref().map(|b| b.size()).unwrap_or(0) as usize;
+        for input in inputs {
+            if let Some(last_input) = &self.last_input {
+                let mut last_input = last_input.clone();
 
-            if required_size > current_size {
-                let new_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Instance buffer"),
-                    size: (required_size * 2) as u64,
-                    mapped_at_creation: true,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
-                });
+                while (input.position - last_input.position).len() >= brush.spacing {
+                    let vector = input.position - last_input.position;
+                    let lerp_fraction = brush.spacing / vector.len();
+                    let next_input = StylusInput::lerp(&last_input, input, lerp_fraction);
+                    let stamp = Stamp {
+                        color: [color[0], color[1], color[2], 1.0],
+                        world_coords: (next_input.position
+                            + brush
+                                .offset
+                                .derive(&mut self.jitter, Some(&last_input), &next_input)
+                                .into())
+                        .into(),
+                        size: brush.size.derive(&mut self.jitter, Some(&last_input), &next_input),
+                        flow: brush.flow.derive(&mut self.jitter, Some(&last_input), &next_input),
+                        opacity: brush.opacity.derive(&mut self.jitter, Some(&last_input), &next_input),
+                    };
+                    match &mut bounds {
+                        Some(bounds) => bounds.expand_mut(stamp.rect()),
+                        None => bounds = Some(stamp.rect()),
+                    };
+                    stamps.push(stamp);
+                    last_input = next_input;
+                }
 
-                let mut mapped_range = new_buffer.get_mapped_range_mut(..);
-                let casted_mapped_range: &mut [Stamp] = bytemuck::cast_slice_mut(&mut mapped_range);
-                casted_mapped_range[0..self.stamp_queue.len()].copy_from_slice(&self.stamp_queue);
-                drop(mapped_range);
-                new_buffer.unmap();
-                self.stamp_buffer = Some(new_buffer);
+                self.last_input = Some(last_input);
             } else {
-                // unwrap():
-                // - current_size must not be zero
-                // - !stamp_queue.is_empty() so required_size must not be zero
-                let stamp_buffer = self.stamp_buffer.as_ref().unwrap();
-                let write_data = bytemuck::cast_slice(&self.stamp_queue);
-                self.queue.write_buffer(stamp_buffer, 0, write_data);
+                let stamp = Stamp {
+                    color: [color[0], color[1], color[2], 1.0],
+                    world_coords: (input.position + brush.offset.derive(&mut self.jitter, None, input).into()).into(),
+                    size: brush.size.derive(&mut self.jitter, None, input),
+                    flow: brush.flow.derive(&mut self.jitter, None, input),
+                    opacity: brush.opacity.derive(&mut self.jitter, None, input),
+                };
+
+                self.last_input = Some(input.clone());
+                bounds = Some(stamp.rect());
+                stamps.push(stamp);
             }
         }
 
-        self.stamp_count = self.stamp_queue.len() as u32;
-        self.stamp_queue.clear();
-        Ok(())
-    }
+        let required_buffer_size = size_of::<Stamp>() * stamps.len();
+        let current_buffer_size = self.stamp_buffer.as_ref().map(|b| b.size()).unwrap_or(0) as usize;
+        let instance_buffer = if required_buffer_size == 0 {
+            // Appears to be draw-only
+            // In this case, we can just skip `process()`.
+            None
+        } else if required_buffer_size > current_buffer_size {
+            let new_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Instance buffer"),
+                size: (required_buffer_size * 2) as u64,
+                mapped_at_creation: true,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
+            });
 
-    fn render_input(&mut self, id: &I, rect: &Rect, encoder: &mut wgpu::CommandEncoder) -> Result<(), Error> {
-        let Some(brush) = &self.brush else {
-            return Err(Error::NoPreset);
+            let mut mapped_range = new_buffer.get_mapped_range_mut(..);
+            let casted_mapped_range: &mut [Stamp] = bytemuck::cast_slice_mut(&mut mapped_range);
+            casted_mapped_range[0..stamps.len()].copy_from_slice(&stamps);
+            drop(mapped_range);
+            new_buffer.unmap();
+            self.stamp_buffer = Some(new_buffer);
+            self.stamp_buffer.clone()
+        } else {
+            // unwrap():
+            // - required size is not zero
+            // - required size is less than or equals to current size
+            // - therefore, current size is not zero, so `None` is impossible
+            let stamp_buffer = self.stamp_buffer.as_ref().unwrap();
+            let write_data = bytemuck::cast_slice(&stamps);
+            self.queue.write_buffer(stamp_buffer, 0, write_data);
+            self.stamp_buffer.clone()
         };
 
-        if !self.tiles.contains_key(id) {
-            self.tiles.insert(id.clone(), InternalTileData::new(self, rect));
-        }
-
-        {
-            let mut uniform_data = self.uniform_staging.write_buffer(
-                encoder,
-                &self.uniform_buffer,
-                0,
-                (size_of::<[f32; 16]>() as u64).try_into()?,
-            );
-            let uniform_data: &mut [f32] = bytemuck::cast_slice_mut(&mut uniform_data);
-            bytemuck::fill_zeroes(uniform_data);
-            uniform_data[0] = 2.0 / rect.size().0;
-            uniform_data[5] = -2.0 / rect.size().1;
-            uniform_data[10] = 1.0;
-            uniform_data[12] = -1.0;
-            uniform_data[13] = 1.0;
-            uniform_data[15] = 1.0;
-        }
-
-        let tile = &self.tiles[id];
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &tile.color_view,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-                resolve_target: None,
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &tile.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-        render_pass.set_pipeline(&brush.pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-        render_pass.set_bind_group(1, &brush.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.stamp_buffer.as_ref().expect("buffer").slice(..));
-        render_pass.draw(0..4, 0..self.stamp_count);
-        drop(render_pass);
-        Ok(())
-    }
-
-    fn render_tile(
-        &mut self,
-        id: &I,
-        transform: &[f32; 16],
-        target: &wgpu::TextureView,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<(), Error> {
-        let Some(tile) = self.tiles.get(id) else {
-            return Err(Error::NoTile);
-        };
-
-        {
-            let mut uniform_data = self.uniform_staging.write_buffer(
-                encoder,
-                &self.uniform_buffer,
-                0,
-                (size_of::<[f32; 16]>() as u64).try_into()?,
-            );
-            let uniform_data: &mut [f32] = bytemuck::cast_slice_mut(&mut uniform_data);
-            uniform_data[0..16].copy_from_slice(transform);
-        }
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-                resolve_target: None,
-            })],
-            ..Default::default()
-        });
-        render_pass.set_pipeline(&self.copy_pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-        render_pass.set_bind_group(1, &tile.copy_bind_group, &[]);
-        render_pass.draw(0..4, 0..1);
-        drop(render_pass);
-        Ok(())
-    }
-
-    fn render_finish(&mut self) -> Result<(), Error> {
-        self.uniform_staging.finish();
-        Ok(())
+        Ok(StampRenderPhase {
+            renderer: self,
+            encoder: encoder,
+            instances: instance_buffer.map(|r| (r, stamps.len() as u32)),
+            bounds,
+        })
     }
 }
 
@@ -864,5 +773,123 @@ impl DynamicContext for StampBrushDynamicContext {
 
     fn jitter_dab(&mut self) -> f32 {
         self.generator.random()
+    }
+}
+
+pub struct StampRenderPhase<'phase, I: Clone + Eq + Hash> {
+    renderer: &'phase mut StampBrushRenderer<I>,
+    encoder: &'phase mut wgpu::CommandEncoder,
+    instances: Option<(wgpu::Buffer, u32)>,
+    bounds: Option<Rect>,
+}
+
+impl<'phase, I: Clone + Eq + Hash> RenderPhase<'phase> for StampRenderPhase<'phase, I> {
+    type Id = I;
+
+    fn bounds(&self) -> Option<Rect> {
+        self.bounds
+    }
+
+    fn process(&mut self, id: &I, rect: &Rect) -> Result<(), Error> {
+        let Some(brush) = &self.renderer.brush else {
+            return Err(Error::NoPreset);
+        };
+
+        let Some((instance_buffer, instance_count)) = &self.instances else {
+            return Ok(());
+        };
+
+        if !self.renderer.tiles.contains_key(id) {
+            let data = InternalTileData::new(self.renderer, rect);
+            self.renderer.tiles.insert(id.clone(), data);
+        }
+
+        {
+            let mut uniform_data = self.renderer.uniform_staging.write_buffer(
+                self.encoder,
+                &self.renderer.uniform_buffer,
+                0,
+                (size_of::<[f32; 16]>() as u64).try_into()?,
+            );
+            let uniform_data: &mut [f32] = bytemuck::cast_slice_mut(&mut uniform_data);
+            bytemuck::fill_zeroes(uniform_data);
+            uniform_data[0] = 2.0 / rect.size().0;
+            uniform_data[5] = -2.0 / rect.size().1;
+            uniform_data[10] = 1.0;
+            uniform_data[12] = -1.0;
+            uniform_data[13] = 1.0;
+            uniform_data[15] = 1.0;
+        }
+
+        let tile = &self.renderer.tiles[id];
+        let mut render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &tile.color_view,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+                resolve_target: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &tile.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        render_pass.set_pipeline(&brush.pipeline);
+        render_pass.set_bind_group(0, &self.renderer.uniform_bind_group, &[]);
+        render_pass.set_bind_group(1, &brush.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, instance_buffer.slice(..));
+        render_pass.draw(0..4, 0..*instance_count);
+        drop(render_pass);
+        Ok(())
+    }
+
+    fn draw(&mut self, id: &I, transform: &[f32; 16], target: &wgpu::TextureView) -> Result<(), Error> {
+        let Some(tile) = self.renderer.tiles.get(id) else {
+            return Err(Error::NoTile);
+        };
+
+        {
+            let mut uniform_data = self.renderer.uniform_staging.write_buffer(
+                self.encoder,
+                &self.renderer.uniform_buffer,
+                0,
+                (size_of::<[f32; 16]>() as u64).try_into()?,
+            );
+            let uniform_data: &mut [f32] = bytemuck::cast_slice_mut(&mut uniform_data);
+            uniform_data[0..16].copy_from_slice(transform);
+        }
+
+        let mut render_pass = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+                resolve_target: None,
+            })],
+            ..Default::default()
+        });
+        render_pass.set_pipeline(&self.renderer.copy_pipeline);
+        render_pass.set_bind_group(0, &self.renderer.uniform_bind_group, &[]);
+        render_pass.set_bind_group(1, &tile.copy_bind_group, &[]);
+        render_pass.draw(0..4, 0..1);
+        drop(render_pass);
+        Ok(())
+    }
+}
+
+impl<'phase, I: Clone + Eq + Hash> Drop for StampRenderPhase<'phase, I> {
+    fn drop(&mut self) {
+        self.renderer.uniform_staging.finish();
     }
 }

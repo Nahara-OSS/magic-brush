@@ -6,7 +6,7 @@ use magic_brush::{
     all::{Brush, BrushRenderer},
     dynamic::{Dynamic, Modifier, Sensor},
     input::StylusInput,
-    renderer::Renderer,
+    renderer::{RenderPhase, Renderer},
     stamp::{BrushTip, StampBrush},
     utils::lnag::{Rect, Vec2},
 };
@@ -62,33 +62,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Make sure to assign preset to the renderer first
     renderer.use_preset(&brush)?;
 
-    // Begin a new stroke with Renderer::new_stroke()
-    // use_preset() indlrectly calls new_stroke() anyways so there is no need to call it here
-    // renderer.new_stroke();
-
-    // Supply one or more stylus inputs to the renderer
-    // Here we just draw from (100; 100) to (1000; 1000) while increasing the logical pressure value from 0 to 1
-    // We also pick pure red color for this one
-    renderer.next_input(
-        &StylusInput {
-            timestamp: 0.0,
-            position: Vec2(100.0, 100.0),
-            pressure: 0.0,
-            tilt: Vec2(0.0, 0.0),
-            twist: 0.0,
-        },
-        [1.0, 0.0, 0.0],
-    )?;
-    renderer.next_input(
-        &StylusInput {
-            timestamp: 2.0,
-            position: Vec2(1000.0, 1000.0),
-            pressure: 1.0,
-            tilt: Vec2(0.0, 0.0),
-            twist: 0.0,
-        },
-        [1.0, 0.0, 0.0],
-    )?;
+    // If the renderer already have preset but you want to make new stroke, you can use new_stroke()
+    // renderer.new_stroke()?;
 
     // This part is where we encode command buffer and submit it to actually draw something
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -109,33 +84,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(render_pass);
 
     // Here we begin putting our brush renderer to rendering phase
-    renderer.render_begin()?;
+    let mut phase = renderer.begin_render(
+        &mut encoder,
+        &[0.0, 0.0, 0.0],
+        &[
+            StylusInput {
+                timestamp: 0.0,
+                position: Vec2(100.0, 100.0),
+                pressure: 0.0,
+                tilt: Vec2(0.0, 0.0),
+                twist: 0.0,
+            },
+            StylusInput {
+                timestamp: 2.0,
+                position: Vec2(1000.0, 1000.0),
+                pressure: 1.0,
+                tilt: Vec2(0.0, 0.0),
+                twist: 0.0,
+            },
+        ],
+    )?;
 
-    // Then we get the renderer to prepare to render to 1024x1024 texture
-    renderer.render_input(
+    // Then we process the content of the tile
+    phase.process(
         &(),
         &Rect {
             min: Vec2(0.0, 0.0),
             max: Vec2(1024.0, 1024.0),
         },
-        &mut encoder,
     )?;
 
-    // And finally, we draw the stroke to texture view of output texture
-    // In reality, applications would call render_finish(), then submit the command buffer and done here.
+    // And finally, we draw the tile content inside renderer to output
+    // In reality, applications would drop the phase here, then submit the command buffer.
     let identity = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
-    renderer.render_tile(
-        &(),
-        &identity,
-        &output_texture.create_view(&Default::default()),
-        &mut encoder,
-    )?;
+    phase.draw(&(), &identity, &output_texture.create_view(&Default::default()))?;
 
-    // Finalize the renderer.
-    // After this function is called, render_begin() must not be called until the command buffer is submitted.
-    renderer.render_finish()?;
+    // Finalize the renderer by dropping the value.
+    // Once dropped, begin_render() must not be called until the command buffer is submitted.
+    drop(phase);
 
     // Here we just copy content of texture to output buffer so we can read the image data.
     // Typically it would be something like presenting the surface texture.

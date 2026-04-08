@@ -37,12 +37,18 @@ use crate::{input::StylusInput, utils::lnag::Rect};
 /// [`Renderer::render_tile`] may only be called for any tiles that are actually visible in viewport.
 ///
 /// This is why the whole [`Renderer`] trait is so complicated.
-pub trait Renderer<P, I: Clone + Eq + Hash> {
+pub trait Renderer {
+    type Preset;
+    type Id: Clone + Eq + Hash;
+    type Phase<'phase>: RenderPhase<'phase, Id = Self::Id>
+    where
+        Self: 'phase;
+
     /// Create new brush renderer.
     fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self;
 
     /// Set preset for this brush renderer.
-    fn use_preset(&mut self, preset: &P) -> Result<(), Error>;
+    fn use_preset(&mut self, preset: &Self::Preset) -> Result<(), Error>;
 
     /// Begin new stroke.
     ///
@@ -54,51 +60,63 @@ pub trait Renderer<P, I: Clone + Eq + Hash> {
     /// Calling this function multiple times is harmless, since calling the second time will do nothing.
     fn new_stroke(&mut self) -> Result<(), Error>;
 
-    /// Read next input event.
+    /// Begin rendering the brush.
     ///
-    /// Read the next input event and update the renderer state accordingly. The color is a three-component array in RGB
-    /// order and it applies to partial stroke created from this function. This must be called before entering rendering
-    /// phase.
-    fn next_input(&mut self, input: &StylusInput, color: [f32; 3]) -> Result<Rect, Error>;
+    /// This function begin the rendering of the brush stroke to either the internal textures/buffers or output to
+    /// texture view (or both).
+    ///
+    /// Reason for why `color` only have 3 components is: Because each brush preset have 2 kinds of "opacity", a single
+    /// opacity channel in color can be quite confusing. The opacity values are also controllable by brush dynamics, so
+    /// a fixed value is not suitable.
+    fn begin_render<'phase, 'input, T: IntoIterator<Item = &'input StylusInput>>(
+        &'phase mut self,
+        encoder: &'phase mut wgpu::CommandEncoder,
+        color: &[f32; 3],
+        inputs: T,
+    ) -> Result<Self::Phase<'phase>, Error>;
+}
 
-    /// Begin rendering phase.
-    ///
-    /// Calling this function will begin the rendering phase, which is the part where the renderer actually draw/compute
-    /// something (either draw to internal texture or to texture view). Only call this once the command buffer from
-    /// previous invocation is submitted.
-    fn render_begin(&mut self) -> Result<(), Error>;
+/// A trait for rendering phase.
+///
+/// A rendering phase can be used for 2 things: to process the content of a tile or to draw the tile to views.
+pub trait RenderPhase<'phase> {
+    type Id: Clone + Eq + Hash;
 
-    /// Draw or compute internally.
+    /// The area on the canvas affected by partial stroke.
     ///
-    /// This function will draw or perform computation internally. The command encoder will be used to issue new render
-    /// or compute passes, as well as performing copies from staging to working (uniform or storage) buffer.
-    /// [`Renderer::render_begin`] must be called before calling this function.
-    fn render_input(&mut self, id: &I, rect: &Rect, encoder: &mut wgpu::CommandEncoder) -> Result<(), Error>;
+    /// This function obtains the area on the canvas that is affected by the partial stroke generated from
+    /// [`Renderer::begin_render`] invocation. Use this rectangle area to determine which tiles should be provided to
+    /// [`RenderPhase::process`]. May return [`None`] if `inputs` is empty when calling [`Renderer::begin_render`].
+    fn bounds(&self) -> Option<Rect>;
 
-    /// Draw current stroke to texture view.
+    /// Process the tile.
     ///
-    /// This function basically take whatever stored to internal texture/buffer from [`Renderer::render_input`] and
-    /// render it to [`wgpu::TextureView`]. The 4x4 transformation matrix can be used to transform the quad that is
-    /// covering entire viewport (which is useful for displaying the stroke preview to surface for example).
-    fn render_tile(
-        &mut self,
-        id: &I,
-        transform: &[f32; 16],
-        target: &wgpu::TextureView,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<(), Error>;
+    /// Internally, this function allocates temporary resources associated with tile ID (if it is not existed before),
+    /// then draw whatever stored inside input buffer (usually vertex/instance buffer) to.the temporary tile resources.
+    fn process(&mut self, id: &Self::Id, rect: &Rect) -> Result<(), Error>;
 
-    /// Finish rendering phase.
+    /// Draw the tile content.
     ///
-    /// Calling this function will finalize the rendering phase. The rendering phase must not be re-entered after
-    /// calling this function until the command buffer is submitted using [`wgpu::Queue::submit`].
-    fn render_finish(&mut self) -> Result<(), Error>;
+    /// Draw the content of the tile to texture view.
+    fn draw(&mut self, id: &Self::Id, transform: &[f32; 16], target: &wgpu::TextureView) -> Result<(), Error>;
 }
 
 #[derive(Debug)]
 pub enum Error {
+    /// Error when no preset is active.
+    ///
+    /// Except for [`Renderer::use_preset`], any functions may return this error when there is no preset assigned to the
+    /// renderer.
     NoPreset,
+
+    /// Error when no tile resource associated with ID found.
+    ///
+    /// This error occur when [`RenderPhase::process`] is not called for given tile ID throughout the stroke's lifetime.
+    /// If this error occurred when using [`RenderPhase::draw`], it can safely be ignored (nothing will be drawn to the
+    /// texture view).
     NoTile,
+
+    /// Error occured outside what [`Error`] can covers.
     External(Box<dyn std::error::Error>),
 }
 
