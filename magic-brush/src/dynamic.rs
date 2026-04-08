@@ -1,3 +1,5 @@
+use core::f32;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -167,8 +169,26 @@ impl Sensor {
     pub fn derive(&self, ctx: &mut dyn DynamicContext, a: Option<&StylusInput>, b: &StylusInput) -> f32 {
         match self {
             Sensor::Pressure => b.pressure,
-            Sensor::Azimuth => todo!("azimuth"),
-            Sensor::Altitude => todo!("altitude"),
+            Sensor::Azimuth | Sensor::Altitude => {
+                let tan_x = b.tilt.0.to_radians().tan();
+                let tan_y = b.tilt.1.to_radians().tan();
+                let zenith = (tan_x * tan_x + tan_y * tan_y).sqrt().atan();
+                let al = 90.0 - zenith.to_degrees();
+                let az = tan_x.atan2(tan_y).to_degrees();
+                let az = if az < 0.0 { az + 360.0 } else { az };
+
+                let az = if az.is_nan() || (az - 360.0).abs() <= f32::EPSILON {
+                    0.0
+                } else {
+                    az
+                };
+
+                match self {
+                    Sensor::Altitude => al / 90.0,
+                    Sensor::Azimuth => az / 360.0,
+                    _ => unreachable!(),
+                }
+            }
             Sensor::TiltX => (b.tilt.0 + 90.0) / 180.0,
             Sensor::TiltY => (b.tilt.1 + 90.0) / 180.0,
             Sensor::Twist => b.twist / 360.0,
@@ -184,5 +204,41 @@ impl Sensor {
             Sensor::JitterStroke => ctx.jitter_stroke(),
             Sensor::JitterDab => ctx.jitter_dab(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        dynamic::{DynamicContext, Sensor},
+        input::StylusInput,
+        utils::lnag::Vec2,
+    };
+
+    struct TestContext;
+
+    impl DynamicContext for TestContext {
+        fn jitter_stroke(&self) -> f32 {
+            0.42
+        }
+
+        fn jitter_dab(&mut self) -> f32 {
+            0.67
+        }
+    }
+
+    #[test]
+    fn sensor_values_tilt() {
+        let mut ctx = TestContext;
+        let input = StylusInput {
+            timestamp: 0.0,
+            position: Vec2(0.0, 0.0),
+            pressure: 0.0,
+            tilt: Vec2(60.0, 0.0),
+            twist: 0.0,
+        };
+
+        println!("{}", Sensor::Azimuth.derive(&mut ctx, None, &input));
+        println!("{}", Sensor::Altitude.derive(&mut ctx, None, &input) * 90.0);
     }
 }
