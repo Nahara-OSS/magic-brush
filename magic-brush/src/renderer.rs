@@ -6,40 +6,24 @@ use crate::{input::StylusInput, utils::lnag::Rect};
 ///
 /// This trait is meant to be used as "template" for brush renderer implementations. The way API consumer would use the
 /// brush renderers is to create enum variants for each brush type, then dispatch the brush type to correct
-/// [`Renderer::use_preset`].
-///
-/// The order of functions to be called in this renderer is as follows:
-///
-/// 1. [`Renderer::use_preset`] to change brush preset, or [`Renderer::new_stroke`] to begin new stroke.
-/// 1. When received new input event:
-///    1. [`Renderer::next_input`] to read input event.
-///    1. [`Renderer::render_begin`] to prepare for rendering to internal textures/buffers.
-///    1. [`Renderer::render_input`] to render the input that [`Renderer::next_input`] just received.
-///    1. [`Renderer::render_finish`] to finish rendering phase.
-/// 1. When the stroke need to be drawn to view:
-///    1. [`Renderer::render_begin`] to prepare for rendering to view.
-///    1. [`Renderer::render_tile`] to render to view.
-///    1. [`Renderer::render_finish`] to finish rendering phase.
-///
-/// The `P` generic parameter is for brush preset type, while the `I` generic parameter will be used as key for uniquely
-/// identifying the tiles.
-///
-/// # Single canvas rendering
-///
-/// In case of single canvas (a.k.a not using tiles), the `I` generic can jsut become `()`. In this case,
-/// [`Renderer::render_input`] and [`Renderer::render_tile`] may only be called once.
-///
-/// # Tile-based rendering
-///
-/// Nahara's Magic Brush was originally designed for Nahara's Sketchpad, which utilize tile-based system for
-/// near-infinite drawing canvas. In this case, [`Renderer::render_input`] may be called for any tiles affected by
-/// [`Renderer::next_input`] (which are the tiles intersecting the rectangle returned by this function), and
-/// [`Renderer::render_tile`] may only be called for any tiles that are actually visible in viewport.
-///
-/// This is why the whole [`Renderer`] trait is so complicated.
+/// [`Renderer::use_preset`]. Additionally, [`crate::all::BrushRenderer`] may be used if the plan is to use all
+/// available brush types in Nahara's Magic Brush.
 pub trait Renderer {
+    /// The type for presets.
+    ///
+    /// This type is for presets that this renderer can accept in [`Renderer::use_preset`].
     type Preset;
+
+    /// The type of tile ID.
+    ///
+    /// The tile ID is used for associating a tile with temporary resources that are allocated internally in this
+    /// renderer. The resources are cleared upon calling [`Renderer::new_stroke`].
     type Id: Clone + Eq + Hash;
+
+    /// The type for render phase.
+    ///
+    /// Render phase guards the renderer from being used/mutated (until the phase is dropped), as well as automatically
+    /// recall/finish staging belts.
     type Phase<'phase>: RenderPhase<'phase, Id = Self::Id>
     where
         Self: 'phase;
@@ -78,7 +62,11 @@ pub trait Renderer {
 
 /// A trait for rendering phase.
 ///
-/// A rendering phase can be used for 2 things: to process the content of a tile or to draw the tile to views.
+/// A rendering phase can be used for 2 things: to process the content of a tile or to draw the tile to views. The
+/// purpose of rendering phase is to guard the renderer from being mutated during the rendering phase.
+///
+/// Dropping the render phase value will automatically finish the staging belt, which means once the phase is dropped,
+/// [`Renderer::begin_render`] should not be called again until the command buffer is submitted.
 pub trait RenderPhase<'phase> {
     type Id: Clone + Eq + Hash;
 
@@ -97,7 +85,10 @@ pub trait RenderPhase<'phase> {
 
     /// Draw the tile content.
     ///
-    /// Draw the content of the tile to texture view.
+    /// Draw the content of the tile to texture view. The transform matrix can be used to transform the quad that is
+    /// covering entire screen. When drawing the final stroke, the transform matrix is typically an identity matrix,
+    /// which covers entire texture view. When drawing stroke preview, the transform matrix moves the preview to correct
+    /// location, taking canvas pan, zoom or rotate into account.
     fn draw(&mut self, id: &Self::Id, transform: &[f32; 16], target: &wgpu::TextureView) -> Result<(), Error>;
 }
 
